@@ -10,6 +10,13 @@
 rust bevy light field array tooling
 
 
+## setup rtsp streaming
+
+> see: https://www.rustxiu.com/v0.12.4/docs/scenarios/rtsp
+
+`ffmpeg -re -stream_loop -1  -i assets/lizard.mp4 -c:v copy  -c:a copy  -rtsp_transport tcp -f rtsp "rtsp://127.0.0.1:5544/live/test?token=123"`
+
+
 
 ## compatible bevy versions
 

@@ -1,6 +1,11 @@
+use std::num::NonZeroU32;
+use std::sync::{Arc, Mutex};
+
+use anyhow::{bail, Error};
 use async_compat::Compat;
 use bevy::{
     prelude::*,
+    app::AppExit,
     ecs::system::CommandQueue,
     tasks::{
         block_on,
@@ -10,13 +15,15 @@ use bevy::{
     },
 };
 use futures::TryStreamExt;
-use openh264::decoder::{
-    Decoder,
-    DecoderConfig,
+use openh264::{
+    decoder::Decoder,
+    nal_units,
 };
 use retina::{
     client::{
         Credentials,
+        Demuxed,
+        Playing,
         Session,
         SessionOptions,
         SetupOptions,
@@ -25,23 +32,190 @@ use retina::{
     },
     codec::VideoFrame,
 };
-use std::sync::Arc;
 use url::Url;
 
 
 const RTSP_URIS: [&str; 2] = [
-    "rtsp://rtspstream:17ff228aff57ac78589c5ab00d22435a@zephyr.rtsp.stream/movie",
-    "rtsp://rtspstream:827427cceb42214303462d0f4735a6ea@zephyr.rtsp.stream/pattern",
+    // "rtsp://localhost:554/lizard",
+    // "rtsp://rtspstream:17ff228aff57ac78589c5ab00d22435a@zephyr.rtsp.stream/movie",
+    // "rtsp://rtspstream:827427cceb42214303462d0f4735a6ea@zephyr.rtsp.stream/pattern",
+    "rtsp://192.168.1.23/user=admin&password=admin123&channel=1&stream=0.sdp?",
+    "rtsp://192.168.1.24/user=admin&password=admin123&channel=1&stream=0.sdp?",
 ];
 
 
-struct CapturedFrame {
-    index: usize,
-    frame: VideoFrame,
+fn main() {
+    App::new()
+        .add_plugins(DefaultPlugins)
+        .add_systems(Update, press_esc_close)
+        .add_systems(Startup, spawn_tasks)
+        .add_systems(Update, task_loop)
+        .add_systems(Update, handle_tasks)
+        .run();
 }
 
 
-async fn capture_frame_to_bytes(url: &str, index: usize) -> Result<CapturedFrame, Box<dyn std::error::Error + Send + Sync>> {
+#[derive(Component)]
+struct ReadRtspFrame(Task<CommandQueue>);
+
+#[derive(Component, Clone)]
+struct RtspStream {
+    uri: String,
+    index: usize,
+    demuxed: Arc<Mutex<Option<Demuxed>>>,
+    decoder: Arc<Mutex<Option<Decoder>>>,
+}
+
+
+// TODO: decouple bevy async tasks and the multi-stream RTSP handling
+//       a bevy system should query the readiness of a frame for each RTSP stream and update texture as needed
+//       the RTSP handling should be a separate async tokio pool that updates the readiness of each RTSP stream /w buffer for transfer to texture
+
+
+fn spawn_tasks(
+    mut commands: Commands,
+) {
+    RTSP_URIS.iter()
+        .enumerate()
+        .for_each(|(index, &url)| {
+            let entity = commands.spawn_empty().id();
+
+            let api = openh264::OpenH264API::from_source();
+            let decoder = Decoder::new(api).unwrap();
+
+            let rtsp_stream = RtspStream {
+                uri: url.to_string(),
+                index,
+                demuxed: Arc::new(Mutex::new(None)),
+                decoder: Arc::new(Mutex::new(decoder.into())),
+            };
+            let demuxed_arc = rtsp_stream.demuxed.clone();
+
+            let session_result = futures::executor::block_on(Compat::new(create_session(&url)));
+            match session_result {
+                Ok(playing) => {
+                    let mut demuxed = demuxed_arc.lock().unwrap();
+                    *demuxed = Some(playing.demuxed().unwrap());
+
+                    println!("created demuxer for {}", url);
+                },
+                Err(e) => panic!("Failed to create session: {}", e),
+            }
+
+            queue_rtsp_frame(
+                &rtsp_stream,
+                &mut commands,
+                entity,
+            );
+
+            commands.entity(entity).insert(rtsp_stream);
+        });
+}
+
+
+fn task_loop(
+    mut commands: Commands,
+    streams: Query<
+        (
+            Entity,
+            &RtspStream,
+        ),
+        Without<ReadRtspFrame>,
+    >,
+) {
+    for (entity, rtsp_stream) in &mut streams.iter() {
+        queue_rtsp_frame(
+            rtsp_stream,
+            &mut commands,
+            entity,
+        );
+    }
+}
+
+
+fn handle_tasks(
+    mut commands: Commands,
+    mut tasks: Query<&mut ReadRtspFrame>,
+) {
+    for mut task in &mut tasks {
+        if let Some(mut commands_queue) = block_on(future::poll_once(&mut task.0)) {
+            commands.append(&mut commands_queue);
+        }
+    }
+}
+
+
+fn convert_h264(data: &mut [u8]) -> Result<(), Error> {
+    let mut i = 0;
+    while i < data.len() - 3 {
+        // Replace each NAL's length with the Annex B start code b"\x00\x00\x00\x01".
+        let len = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]) as usize;
+        data[i] = 0;
+        data[i + 1] = 0;
+        data[i + 2] = 0;
+        data[i + 3] = 1;
+        i += 4 + len;
+        if i > data.len() {
+            bail!("partial NAL body");
+        }
+    }
+    if i < data.len() {
+        bail!("partial NAL length");
+    }
+    Ok(())
+}
+
+fn queue_rtsp_frame(
+    rtsp_stream: &RtspStream,
+    commands: &mut Commands,
+    entity: Entity,
+) {
+    let idx = rtsp_stream.index;
+    let demuxed_arc = rtsp_stream.demuxed.clone();
+    let decoder_arc = rtsp_stream.decoder.clone();
+
+    let task = AsyncComputeTaskPool::get().spawn(async move {
+        let result = futures::executor::block_on(Compat::new(capture_frame(demuxed_arc.clone())));
+
+        // TODO: clean this mess
+        match result {
+            Ok(frame) => {
+                let mut decoder_lock = decoder_arc.lock().unwrap();
+                let decoder = decoder_lock.as_mut().unwrap();
+
+                let mut data = frame.into_data();
+                let annex_b_convert = convert_h264(&mut data);
+
+                match annex_b_convert {
+                    Ok(_) => for packet in nal_units(&data) {
+                        let result = decoder.decode(packet);
+
+                        match result {
+                            Ok(decoded_frame) => {
+                                println!("decoded frame from stream {}", idx);
+                                // TODO: populate 'latest frame' with new data
+                            },
+                            Err(e) => println!("failed to decode frame for stream {}: {}", idx, e),
+                        }
+                    },
+                    Err(e) => println!("failed to convert NAL unit to Annex B format: {}", e)
+                }
+            },
+            Err(e) => println!("failed to capture frame for stream {}: {}", idx, e),
+        }
+
+        let mut command_queue = CommandQueue::default();
+        command_queue.push(move |world: &mut World| {
+            world.entity_mut(entity).remove::<ReadRtspFrame>();
+        });
+
+        command_queue
+    });
+
+    commands.entity(entity).insert(ReadRtspFrame(task));
+}
+
+async fn create_session(url: &str) -> Result<Session<Playing>, Box<dyn std::error::Error + Send + Sync>> {
     let parsed_url = Url::parse(url)?;
 
     let username = parsed_url.username();
@@ -82,18 +256,27 @@ async fn capture_frame_to_bytes(url: &str, index: usize) -> Result<CapturedFrame
 
     session.setup(video_stream_index, SetupOptions::default().transport(transport)).await?;
 
-    let described = session.play(retina::client::PlayOptions::default()).await?;
-    let mut demuxed = described.demuxed()?;
+    let described = session.play(
+        retina::client::PlayOptions::default()
+            .enforce_timestamps_with_max_jump_secs(NonZeroU32::new(10).unwrap())
+    ).await?;
 
+    Ok(described)
+}
+
+async fn capture_frame(demuxed: Arc<Mutex<Option<Demuxed>>>) -> Result<VideoFrame, Box<dyn std::error::Error + Send + Sync>> {
+    let mut demux_lock = demuxed.lock().unwrap();
+    let demuxed = demux_lock.as_mut().unwrap();
     if let Some(item) = demuxed.try_next().await? {
         match item {
             retina::codec::CodecItem::VideoFrame(frame) => {
-                Ok(CapturedFrame {
-                    index,
-                    frame,
-                })
+                Ok(frame)
             },
-            _ => Err("Expected a video frame, but got something else.".into()),
+            retina::codec::CodecItem::MessageFrame(frame) => {
+                println!("Received message frame: {:?}", frame);
+                Err("Received message frame.".into())
+            },
+            _ => Err("Expected a video frame, but got something else".into()),
         }
     } else {
         Err("No frames were received.".into())
@@ -101,206 +284,11 @@ async fn capture_frame_to_bytes(url: &str, index: usize) -> Result<CapturedFrame
 }
 
 
-#[derive(Component)]
-struct ReadRtspFrame(Task<CommandQueue>);
-
-
-fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins)
-        .add_systems(Startup, spawn_tasks)
-        .add_systems(Update, handle_tasks)
-        .run();
-}
-
-
-fn spawn_tasks(
-    mut commands: Commands,
+fn press_esc_close(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut exit: EventWriter<AppExit>
 ) {
-    let thread_pool = AsyncComputeTaskPool::get();
-
-    RTSP_URIS.iter()
-        .enumerate()
-        .for_each(|(index, &url)| {
-            let entity = commands.spawn_empty().id();
-
-            let task = thread_pool.spawn(async move {
-                let result = futures::executor::block_on(Compat::new(capture_frame_to_bytes(url, index)));
-                match result {
-                    Ok(captured_frame) => {
-                        println!("Captured frame from camera {}:\n{:?}", captured_frame.index, captured_frame.frame);
-                    },
-                    Err(e) => eprintln!("Failed to capture frame: {}", e),
-                }
-
-                let mut command_queue = CommandQueue::default();
-                command_queue.push(move |world: &mut World| {
-                    world.entity_mut(entity).remove::<ReadRtspFrame>();
-                });
-
-                command_queue
-            });
-
-            commands.entity(entity).insert(ReadRtspFrame(task));
-        });
-}
-
-
-fn handle_tasks(
-    mut commands: Commands,
-    mut tasks: Query<&mut ReadRtspFrame>,
-) {
-    for mut task in &mut tasks {
-        if let Some(mut commands_queue) = block_on(future::poll_once(&mut task.0)) {
-            commands.append(&mut commands_queue);
-        }
+    if keys.just_pressed(KeyCode::Escape) {
+        exit.send(AppExit);
     }
 }
-
-
-
-// https://github.com/PortalCloudInc/bevy_video
-// #[derive(Component)]
-// pub struct VideoDecoder {
-//     sender: Mutex<Sender<DecoderMessage>>,
-//     next_frame_rgb8: Arc<Mutex<Option<VideoFrame>>>,
-//     render_target: Handle<Image>,
-// }
-
-// impl VideoDecoder {
-//     pub fn create(images: &mut ResMut<Assets<Image>>) -> (Handle<Image>, VideoDecoder) {
-//         let render_target = images.add(Self::create_image(12, 12));
-//         let (sender, receiver) = channel::<DecoderMessage>();
-//         let next_frame_rgb8 = Arc::new(Mutex::new(None));
-
-//         std::thread::spawn({
-//             let next_frame_rgb8 = next_frame_rgb8.clone();
-//             move || {
-//                 let cfg = DecoderConfig::new();
-//                 let mut decoder = Decoder::with_config(cfg).expect("Failed to create AVC decoder");
-//                 for video_packet in receiver {
-//                     let video_packet = match video_packet {
-//                         DecoderMessage::Frame(video_packet) => video_packet,
-//                         DecoderMessage::Stop => return,
-//                     };
-//                     let decoded_yuv = decoder.decode(video_packet.as_slice());
-//                     let decoded_yuv = match decoded_yuv {
-//                         Ok(decoded_yuv) => decoded_yuv,
-//                         Err(e) => {
-//                             error!("Failed to decode frame: {}", e);
-//                             continue;
-//                         }
-//                     };
-//                     let Some(decoded_yuv) = decoded_yuv else { continue };
-//                     let (width, height) = decoded_yuv.dimension_rgb();
-//                     let mut buffer = vec![0; width * height * 3];
-
-//                     // TODO: Don't convert YUV -> RGB -> BGRA, just make something for YUV -> BGRA
-//                     decoded_yuv.write_rgb8(buffer.as_mut_slice());
-
-//                     let frame = VideoFrame {
-//                         buffer,
-//                         width,
-//                         height,
-//                     };
-
-//                     next_frame_rgb8.lock().unwrap().replace(frame);
-//                 }
-//             }
-//         });
-
-//         let video_decoder = Self {
-//             sender: Mutex::new(sender),
-//             next_frame_rgb8,
-//             render_target: render_target.clone_weak(),
-//         };
-
-//         (render_target, video_decoder)
-//     }
-
-//     fn create_image(width: u32, height: u32) -> Image {
-//         let size = Extent3d {
-//             width,
-//             height,
-//             ..default()
-//         };
-
-//         let mut image = Image {
-//             texture_descriptor: TextureDescriptor {
-//                 label: Some("Video stream render target"),
-//                 size,
-//                 dimension: TextureDimension::D2,
-//                 format: TextureFormat::Bgra8UnormSrgb,
-//                 mip_level_count: 1,
-//                 sample_count: 1,
-//                 usage: TextureUsages::COPY_DST
-//                     | TextureUsages::TEXTURE_BINDING
-//                     | TextureUsages::RENDER_ATTACHMENT,
-//             },
-//             ..default()
-//         };
-//         image.resize(size);
-//         image
-//     }
-
-//     pub fn add_video_packet(&self, video_packet: Vec<u8>) {
-//         self.sender
-//             .lock()
-//             .expect("Could not get lock on sender")
-//             .send(DecoderMessage::Frame(video_packet))
-//             .expect("Could not send packet to decoder thread");
-//     }
-
-//     pub(crate) fn take_frame_rgb8(&self) -> Option<VideoFrame> {
-//         self.next_frame_rgb8.lock().unwrap().take()
-//     }
-
-//     pub fn get_render_target(&self) -> Handle<Image> {
-//         self.render_target.clone_weak()
-//     }
-// }
-
-
-// pub fn apply_decode(
-//     mut commands: Commands,
-//     mut images: ResMut<Assets<Image>>,
-//     decoders: Query<(Entity, &VideoDecoder)>,
-// ) {
-//     for (entity, decoder) in decoders.iter() {
-//         let frame = decoder.take_frame_rgb8();
-//         if let Some(frame) = frame {
-//             let VideoFrame {
-//                 buffer,
-//                 width,
-//                 height,
-//             } = frame;
-
-//             let image_handle = decoder.get_render_target();
-//             let image = match images.get_mut(&image_handle) {
-//                 Some(image) => image,
-//                 None => {
-//                     info!(
-//                         "Image gone. Removing video decoder from {:?} and stopping decode thread",
-//                         entity
-//                     );
-//                     commands.entity(entity).remove::<VideoDecoder>();
-//                     continue;
-//                 }
-//             };
-
-//             if image.texture_descriptor.size.width != width as u32
-//                 || image.texture_descriptor.size.height != height as u32
-//             {
-//                 image.resize(Extent3d {
-//                     width: width as u32,
-//                     height: height as u32,
-//                     ..default()
-//                 });
-//             }
-
-//             for (dest, src) in image.data.chunks_exact_mut(4).zip(buffer.chunks_exact(3)) {
-//                 dest.copy_from_slice(&[src[2], src[1], src[0], 255]);
-//             }
-//         }
-//     }
-// }

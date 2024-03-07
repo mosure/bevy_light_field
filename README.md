@@ -10,6 +10,7 @@
 rust bevy light field camera array tooling
 
 
+
 ## run the viewer
 
 `cargo run -- --help`
@@ -26,7 +27,18 @@ the viewer opens a window and displays the light field camera array, with post-p
 - [ ] real-time 3d reconstruction viewer
 
 
+## light field camera array
+
+view the [onshape model](https://cad.onshape.com/documents/20d4b522e97cda88fb785536/w/9939c2cecd85477ae7e753f6/e/69f97c604cdee8494e4e46bc?renderMode=0&uiState=65ea51d493f7bd0c772084fa)
+
+![Alt text](docs/light_field_camera_onshape_transparent.webp)
+
+- [ ] parts list
+
+
 ## setup rtsp streaming server
+
+it is useful to test the light field viewer with emulated camera streams
 
 ### obs studio
 

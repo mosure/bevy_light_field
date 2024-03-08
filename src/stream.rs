@@ -263,7 +263,7 @@ impl RtspStream {
         loop {
             let frame = self.capture_frame().await?;
 
-            if let Some(command) = receiver.try_recv().ok() {
+            if let Ok(command) = receiver.try_recv() {
                 match command {
                     RecordingCommand::StartRecording(file) => {
                         if let Some(writer) = self.writer.take() {

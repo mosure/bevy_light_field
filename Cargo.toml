@@ -26,9 +26,6 @@ exclude = [
 default-run = "viewer"
 
 
-# TODO: add feature for ffmpeg output
-
-
 [dependencies]
 anyhow = "1.0"
 async-compat = "0.2"

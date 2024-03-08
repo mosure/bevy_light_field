@@ -158,4 +158,5 @@ it is useful to test the light field viewer with emulated camera streams
 
 ## credits
 - [bevy_video](https://github.com/PortalCloudInc/bevy_video)
+- [gaussian_avatars](https://github.com/ShenhanQian/GaussianAvatars)
 - [paddle_seg_matting](https://github.com/PaddlePaddle/PaddleSeg/blob/release/2.9/Matting/docs/quick_start_en.md)

@@ -123,9 +123,9 @@ fn create_streams(
 
 view the [onshape model](https://cad.onshape.com/documents/20d4b522e97cda88fb785536/w/9939c2cecd85477ae7e753f6/e/69f97c604cdee8494e4e46bc?renderMode=0&uiState=65ea51d493f7bd0c772084fa)
 
-![Alt text](docs/light_field_camera_onshape_transparent.webp)
-
 - [ ] parts list
+
+![Alt text](docs/light_field_camera_onshape_transparent.webp)
 
 
 ## setup rtsp streaming server

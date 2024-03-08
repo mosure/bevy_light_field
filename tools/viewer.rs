@@ -1,286 +1,155 @@
-use std::num::NonZeroU32;
-use std::sync::{Arc, Mutex};
-
-use anyhow::{bail, Error};
-use async_compat::Compat;
 use bevy::{
     prelude::*,
     app::AppExit,
-    ecs::system::CommandQueue,
-    tasks::{
-        block_on,
-        futures_lite::future,
-        AsyncComputeTaskPool,
-        Task,
+    render::{
+        render_asset::RenderAssetUsages,
+        render_resource::{
+            Extent3d,
+            TextureDescriptor,
+            TextureDimension,
+            TextureFormat,
+            TextureUsages,
+        },
     },
+    window::PrimaryWindow,
 };
-use futures::TryStreamExt;
-use openh264::{
-    decoder::Decoder,
-    nal_units,
+
+use bevy_light_field::stream::{
+    RtspStreamDescriptor,
+    RtspStreamPlugin,
+    StreamId,
 };
-use retina::{
-    client::{
-        Credentials,
-        Demuxed,
-        Playing,
-        Session,
-        SessionOptions,
-        SetupOptions,
-        TcpTransportOptions,
-        Transport,
-    },
-    codec::VideoFrame,
-};
-use url::Url;
 
 
 const RTSP_URIS: [&str; 2] = [
-    // "rtsp://localhost:554/lizard",
-    // "rtsp://rtspstream:17ff228aff57ac78589c5ab00d22435a@zephyr.rtsp.stream/movie",
-    // "rtsp://rtspstream:827427cceb42214303462d0f4735a6ea@zephyr.rtsp.stream/pattern",
     "rtsp://192.168.1.23/user=admin&password=admin123&channel=1&stream=0.sdp?",
     "rtsp://192.168.1.24/user=admin&password=admin123&channel=1&stream=0.sdp?",
 ];
 
 
 fn main() {
+    let primary_window = Some(Window {
+        mode: bevy::window::WindowMode::Windowed,
+        prevent_default_event_handling: false,
+        resolution: (1920.0, 1080.0).into(),
+        title: "bevy_light_field - RTSP Viewer".to_string(),
+        present_mode: bevy::window::PresentMode::AutoVsync,
+        ..default()
+    });
+
     App::new()
-        .add_plugins(DefaultPlugins)
+        .add_plugins((
+            DefaultPlugins
+                .set(WindowPlugin {
+                    primary_window,
+                    ..default()
+                }),
+            RtspStreamPlugin,
+        ))
+        .add_systems(Startup, create_streams)
+        .add_systems(Startup, setup_camera)
         .add_systems(Update, press_esc_close)
-        .add_systems(Startup, spawn_tasks)
-        .add_systems(Update, task_loop)
-        .add_systems(Update, handle_tasks)
         .run();
 }
 
 
-#[derive(Component)]
-struct ReadRtspFrame(Task<CommandQueue>);
-
-#[derive(Component, Clone)]
-struct RtspStream {
-    uri: String,
-    index: usize,
-    demuxed: Arc<Mutex<Option<Demuxed>>>,
-    decoder: Arc<Mutex<Option<Decoder>>>,
-}
-
-
-// TODO: decouple bevy async tasks and the multi-stream RTSP handling
-//       a bevy system should query the readiness of a frame for each RTSP stream and update texture as needed
-//       the RTSP handling should be a separate async tokio pool that updates the readiness of each RTSP stream /w buffer for transfer to texture
-
-
-fn spawn_tasks(
+fn create_streams(
     mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    primary_window: Query<&Window, With<PrimaryWindow>>,
 ) {
-    RTSP_URIS.iter()
+    let window = primary_window.single();
+    let (
+        columns,
+        rows,
+        sprite_width,
+        sprite_height,
+    ) = calculate_grid_dimensions(
+        window.width(),
+        window.height(),
+        RTSP_URIS.len()
+    );
+
+    let images: Vec<Handle<Image>> = RTSP_URIS.iter()
         .enumerate()
-        .for_each(|(index, &url)| {
+        .map(|(index, &url)| {
             let entity = commands.spawn_empty().id();
 
-            let api = openh264::OpenH264API::from_source();
-            let decoder = Decoder::new(api).unwrap();
-
-            let rtsp_stream = RtspStream {
-                uri: url.to_string(),
-                index,
-                demuxed: Arc::new(Mutex::new(None)),
-                decoder: Arc::new(Mutex::new(decoder.into())),
+            let size = Extent3d {
+                width: 32,
+                height: 32,
+                ..default()
             };
-            let demuxed_arc = rtsp_stream.demuxed.clone();
 
-            let session_result = futures::executor::block_on(Compat::new(create_session(&url)));
-            match session_result {
-                Ok(playing) => {
-                    let mut demuxed = demuxed_arc.lock().unwrap();
-                    *demuxed = Some(playing.demuxed().unwrap());
-
-                    println!("created demuxer for {}", url);
+            let mut image = Image {
+                asset_usage: RenderAssetUsages::all(),
+                texture_descriptor: TextureDescriptor {
+                    label: Some(url),
+                    size,
+                    dimension: TextureDimension::D2,
+                    format: TextureFormat::Rgba8UnormSrgb,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    usage: TextureUsages::COPY_DST
+                        | TextureUsages::TEXTURE_BINDING
+                        | TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[TextureFormat::Rgba8UnormSrgb],
                 },
-                Err(e) => panic!("Failed to create session: {}", e),
-            }
+                ..default()
+            };
+            image.resize(size);
 
-            queue_rtsp_frame(
-                &rtsp_stream,
-                &mut commands,
-                entity,
+            let image = images.add(image);
+            let image_clone = image.clone();
+
+            let rtsp_stream = RtspStreamDescriptor::new(
+                url.to_string(),
+                StreamId(index),
+                image,
             );
 
             commands.entity(entity).insert(rtsp_stream);
-        });
-}
 
-
-fn task_loop(
-    mut commands: Commands,
-    streams: Query<
-        (
-            Entity,
-            &RtspStream,
-        ),
-        Without<ReadRtspFrame>,
-    >,
-) {
-    for (entity, rtsp_stream) in &mut streams.iter() {
-        queue_rtsp_frame(
-            rtsp_stream,
-            &mut commands,
-            entity,
-        );
-    }
-}
-
-
-fn handle_tasks(
-    mut commands: Commands,
-    mut tasks: Query<&mut ReadRtspFrame>,
-) {
-    for mut task in &mut tasks {
-        if let Some(mut commands_queue) = block_on(future::poll_once(&mut task.0)) {
-            commands.append(&mut commands_queue);
-        }
-    }
-}
-
-
-fn convert_h264(data: &mut [u8]) -> Result<(), Error> {
-    let mut i = 0;
-    while i < data.len() - 3 {
-        // Replace each NAL's length with the Annex B start code b"\x00\x00\x00\x01".
-        let len = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]) as usize;
-        data[i] = 0;
-        data[i + 1] = 0;
-        data[i + 2] = 0;
-        data[i + 3] = 1;
-        i += 4 + len;
-        if i > data.len() {
-            bail!("partial NAL body");
-        }
-    }
-    if i < data.len() {
-        bail!("partial NAL length");
-    }
-    Ok(())
-}
-
-fn queue_rtsp_frame(
-    rtsp_stream: &RtspStream,
-    commands: &mut Commands,
-    entity: Entity,
-) {
-    let idx = rtsp_stream.index;
-    let demuxed_arc = rtsp_stream.demuxed.clone();
-    let decoder_arc = rtsp_stream.decoder.clone();
-
-    let task = AsyncComputeTaskPool::get().spawn(async move {
-        let result = futures::executor::block_on(Compat::new(capture_frame(demuxed_arc.clone())));
-
-        // TODO: clean this mess
-        match result {
-            Ok(frame) => {
-                let mut decoder_lock = decoder_arc.lock().unwrap();
-                let decoder = decoder_lock.as_mut().unwrap();
-
-                let mut data = frame.into_data();
-                let annex_b_convert = convert_h264(&mut data);
-
-                match annex_b_convert {
-                    Ok(_) => for packet in nal_units(&data) {
-                        let result = decoder.decode(packet);
-
-                        match result {
-                            Ok(decoded_frame) => {
-                                println!("decoded frame from stream {}", idx);
-                                // TODO: populate 'latest frame' with new data
-                            },
-                            Err(e) => println!("failed to decode frame for stream {}: {}", idx, e),
-                        }
-                    },
-                    Err(e) => println!("failed to convert NAL unit to Annex B format: {}", e)
-                }
-            },
-            Err(e) => println!("failed to capture frame for stream {}: {}", idx, e),
-        }
-
-        let mut command_queue = CommandQueue::default();
-        command_queue.push(move |world: &mut World| {
-            world.entity_mut(entity).remove::<ReadRtspFrame>();
-        });
-
-        command_queue
-    });
-
-    commands.entity(entity).insert(ReadRtspFrame(task));
-}
-
-async fn create_session(url: &str) -> Result<Session<Playing>, Box<dyn std::error::Error + Send + Sync>> {
-    let parsed_url = Url::parse(url)?;
-
-    let username = parsed_url.username();
-    let password = parsed_url.password().unwrap_or("");
-    let creds = if !username.is_empty() {
-        Some(Credentials {
-            username: username.into(),
-            password: password.into(),
+            image_clone
         })
-    } else {
-        None
-    };
+        .collect();
 
-    let mut clean_url = parsed_url.clone();
-    clean_url.set_username("").unwrap();
-    clean_url.set_password(None).unwrap();
-
-    let session_group = Arc::new(retina::client::SessionGroup::default());
-    let options = SessionOptions::default()
-        .creds(creds)
-        .session_group(session_group);
-
-    let mut session = Session::describe(
-        clean_url,
-        options,
-    ).await?;
-
-    let tcp_options = TcpTransportOptions::default();
-    let transport = Transport::Tcp(tcp_options);
-
-    let video_stream_index = session.streams().iter().enumerate().find_map(|(i, s)| {
-        if s.media() == "video" && s.encoding_name().to_uppercase() == "H264" {
-            Some(i)
-        } else {
-            None
-        }
-    }).ok_or("No suitable H264 video stream found.")?;
-
-    session.setup(video_stream_index, SetupOptions::default().transport(transport)).await?;
-
-    let described = session.play(
-        retina::client::PlayOptions::default()
-            .enforce_timestamps_with_max_jump_secs(NonZeroU32::new(10).unwrap())
-    ).await?;
-
-    Ok(described)
+    commands.spawn(NodeBundle {
+        style: Style {
+            display: Display::Grid,
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            grid_template_columns: RepeatedGridTrack::flex(columns as u16, 1.0),
+            grid_template_rows: RepeatedGridTrack::flex(rows as u16, 1.0),
+            ..default()
+        },
+        background_color: BackgroundColor(Color::DARK_GRAY),
+        ..default()
+    })
+    .with_children(|builder| {
+        images.iter()
+            .for_each(|image| {
+                builder.spawn(ImageBundle {
+                    style: Style {
+                        width: Val::Px(sprite_width),
+                        height: Val::Px(sprite_height),
+                        ..default()
+                    },
+                    image: UiImage::new(image.clone()),
+                    ..default()
+                });
+            });
+    });
 }
 
-async fn capture_frame(demuxed: Arc<Mutex<Option<Demuxed>>>) -> Result<VideoFrame, Box<dyn std::error::Error + Send + Sync>> {
-    let mut demux_lock = demuxed.lock().unwrap();
-    let demuxed = demux_lock.as_mut().unwrap();
-    if let Some(item) = demuxed.try_next().await? {
-        match item {
-            retina::codec::CodecItem::VideoFrame(frame) => {
-                Ok(frame)
-            },
-            retina::codec::CodecItem::MessageFrame(frame) => {
-                println!("Received message frame: {:?}", frame);
-                Err("Received message frame.".into())
-            },
-            _ => Err("Expected a video frame, but got something else".into()),
-        }
-    } else {
-        Err("No frames were received.".into())
-    }
+fn setup_camera(
+    mut commands: Commands,
+) {
+    commands.spawn((
+        Camera2dBundle {
+            ..default()
+        },
+    ));
 }
 
 
@@ -291,4 +160,37 @@ fn press_esc_close(
     if keys.just_pressed(KeyCode::Escape) {
         exit.send(AppExit);
     }
+}
+
+
+fn calculate_grid_dimensions(window_width: f32, window_height: f32, num_streams: usize) -> (usize, usize, f32, f32) {
+    let window_aspect_ratio = window_width / window_height;
+    let stream_aspect_ratio: f32 = 16.0 / 9.0;
+    let mut best_layout = (1, num_streams);
+    let mut best_diff = f32::INFINITY;
+    let mut best_sprite_size = (0.0, 0.0);
+
+    for columns in 1..=num_streams {
+        let rows = (num_streams as f32 / columns as f32).ceil() as usize;
+        let sprite_width = window_width / columns as f32;
+        let sprite_height = sprite_width / stream_aspect_ratio;
+        let total_height_needed = sprite_height * rows as f32;
+        let (final_sprite_width, final_sprite_height) = if total_height_needed > window_height {
+            let adjusted_sprite_height = window_height / rows as f32;
+            let adjusted_sprite_width = adjusted_sprite_height * stream_aspect_ratio;
+            (adjusted_sprite_width, adjusted_sprite_height)
+        } else {
+            (sprite_width, sprite_height)
+        };
+        let grid_aspect_ratio = final_sprite_width * columns as f32 / (final_sprite_height * rows as f32);
+        let diff = (window_aspect_ratio - grid_aspect_ratio).abs();
+
+        if diff < best_diff {
+            best_diff = diff;
+            best_layout = (columns, rows);
+            best_sprite_size = (final_sprite_width, final_sprite_height);
+        }
+    }
+
+    (best_layout.0, best_layout.1, best_sprite_size.0, best_sprite_size.1)
 }

@@ -27,40 +27,25 @@ default-run = "viewer"
 
 
 [dependencies]
-anyhow = "1.0.80"
-async-compat = "0.2.3"
-futures = "0.3.30"
-openh264 = "0.5.0"
-retina = "0.4.7"
-tokio = "1.36.0"
-url = "2.5.0"
+anyhow = "1.0"
+async-compat = "0.2"
+futures = "0.3"
+openh264 = "0.5"
+retina = "0.4"
+tokio = { version = "1.36", features = ["full"] }
+url = "2.5"
 
 
 [dependencies.bevy]
 version = "0.13"
 default-features = false
 features = [
+  "bevy_asset",
   "bevy_core_pipeline",
   "bevy_render",
+  "bevy_ui",
   "bevy_winit",
   "multi-threaded",
-]
-
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-console_error_panic_hook = "0.1"
-wasm-bindgen = "0.2"
-
-
-[dependencies.web-sys]
-version = "=0.3.67"
-features = [
-  'Document',
-  'Element',
-  'HtmlElement',
-  'Location',
-  'Node',
-  'Window',
 ]
 
 
@@ -74,13 +59,6 @@ opt-level = 1
 lto = "thin"
 codegen-units = 1
 opt-level = 3
-
-[profile.wasm-release]
-inherits = "release"
-opt-level = "z"
-lto = "fat"
-codegen-units = 1
-
 
 
 [lib]

@@ -10,6 +10,107 @@
 rust bevy light field camera array tooling
 
 
+## example
+
+```rust
+use bevy::{
+    prelude::*,
+    render::render_resource::{
+        Extent3d,
+        TextureDescriptor,
+        TextureDimension,
+        TextureFormat,
+        TextureUsages,
+    },
+};
+
+use bevy_light_field::stream::{
+    RtspStreamDescriptor,
+    RtspStreamPlugin,
+    StreamId,
+};
+
+
+const RTSP_URIS: [&str; 1] = [
+    "rtsp://localhost:554/lizard",
+];
+
+
+fn main() {
+    App::new()
+        .add_plugins((
+            DefaultPlugins,
+            RtspStreamPlugin,
+        ))
+        .add_systems(Startup, create_streams)
+        .add_systems(Startup, setup_camera)
+        .run();
+}
+
+
+fn create_streams(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+) {
+    RTSP_URIS.iter()
+        .enumerate()
+        .for_each(|(index, &url)| {
+            let entity = commands.spawn_empty().id();
+
+            let size = Extent3d {
+                width: 640,
+                height: 360,
+                ..default()
+            };
+
+            let mut image = Image {
+                texture_descriptor: TextureDescriptor {
+                    label: Some(url),
+                    size,
+                    dimension: TextureDimension::D2,
+                    format: TextureFormat::Rgba8UnormSrgb,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    usage: TextureUsages::COPY_DST
+                        | TextureUsages::TEXTURE_BINDING
+                        | TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[TextureFormat::Rgba8UnormSrgb],
+                },
+                ..default()
+            };
+            image.resize(size);
+
+            let image = images.add(image);
+            commands.spawn(SpriteBundle {
+                sprite: Sprite {
+                    custom_size: Some(Vec2::new(640.0, 360.0)),
+                    ..default()
+                },
+                texture: image.clone(),
+                ..default()
+            });
+
+            let rtsp_stream = RtspStreamDescriptor::new(
+                url.to_string(),
+                StreamId(index),
+                image,
+            );
+
+            commands.entity(entity).insert(rtsp_stream);
+        });
+}
+
+fn setup_camera(
+    mut commands: Commands,
+) {
+    commands.spawn((
+        Camera2dBundle {
+            ..default()
+        },
+    ));
+}
+```
+
 
 ## run the viewer
 
@@ -52,3 +153,7 @@ it is useful to test the light field viewer with emulated camera streams
 | `bevy_light_field`    | `bevy` |
 | :--                   | :--    |
 | `0.1.0`               | `0.13` |
+
+
+## credits
+- [bevy_video](https://github.com/PortalCloudInc/bevy_video)

@@ -27,6 +27,7 @@ const RTSP_URIS: [&str; 2] = [
 ];
 
 
+// TODO: add bevy_args
 fn main() {
     let primary_window = Some(Window {
         mode: bevy::window::WindowMode::Windowed,

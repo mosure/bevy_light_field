@@ -32,7 +32,7 @@ fn main() {
         mode: bevy::window::WindowMode::Windowed,
         prevent_default_event_handling: false,
         resolution: (1920.0, 1080.0).into(),
-        title: "bevy_light_field - RTSP Viewer".to_string(),
+        title: "bevy_light_field - rtsp viewer".to_string(),
         present_mode: bevy::window::PresentMode::AutoVsync,
         ..default()
     });

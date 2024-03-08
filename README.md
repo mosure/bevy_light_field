@@ -13,7 +13,7 @@ rust bevy light field camera array tooling
 ## capabilities
 
 - [X] grid view of light field camera array
-- [ ] stream to files with recording controls (nersemble format)
+- [X] stream to files with recording controls
 - [ ] playback nersemble recordings with annotations
 - [ ] person segmentation post-process (batch across streams)
 - [ ] camera array calibration
@@ -26,6 +26,13 @@ rust bevy light field camera array tooling
 `cargo run -- --help`
 
 the viewer opens a window and displays the light field camera array, with post-process options
+
+### controls
+
+- `r` to start recording
+- `s` to stop recording
+- `esc` to exit
+- [ ] UI controls
 
 
 ## library usage

@@ -15,9 +15,7 @@ use bevy::{
 };
 
 use bevy_light_field::stream::{
-    RtspStreamDescriptor,
-    RtspStreamPlugin,
-    StreamId,
+    RtspStreamDescriptor, RtspStreamManager, RtspStreamPlugin, StreamId
 };
 
 
@@ -49,7 +47,14 @@ fn main() {
         ))
         .add_systems(Startup, create_streams)
         .add_systems(Startup, setup_camera)
-        .add_systems(Update, press_esc_close)
+        .add_systems(
+            Update,
+            (
+                press_esc_close,
+                press_r_start_recording,
+                press_s_stop_recording
+            )
+        )
         .run();
 }
 
@@ -163,6 +168,38 @@ fn press_esc_close(
     }
 }
 
+fn press_r_start_recording(
+    keys: Res<ButtonInput<KeyCode>>,
+    stream_manager: Res<RtspStreamManager>
+) {
+    if keys.just_pressed(KeyCode::KeyR) {
+        let output_directory = "capture";
+        std::fs::create_dir_all(output_directory).unwrap();
+
+        let base_prefix = "bevy_light_field_";
+
+        let prefix = format!(
+            "{}{:03}",
+            base_prefix,
+            get_next_session_id(output_directory, base_prefix)
+        );
+
+        stream_manager.start_recording(
+            output_directory,
+            &prefix,
+        );
+    }
+}
+
+fn press_s_stop_recording(
+    keys: Res<ButtonInput<KeyCode>>,
+    stream_manager: Res<RtspStreamManager>
+) {
+    if keys.just_pressed(KeyCode::KeyS) {
+        stream_manager.stop_recording();
+    }
+}
+
 
 fn calculate_grid_dimensions(window_width: f32, window_height: f32, num_streams: usize) -> (usize, usize, f32, f32) {
     let window_aspect_ratio = window_width / window_height;
@@ -194,4 +231,27 @@ fn calculate_grid_dimensions(window_width: f32, window_height: f32, num_streams:
     }
 
     (best_layout.0, best_layout.1, best_sprite_size.0, best_sprite_size.1)
+}
+
+
+fn get_next_session_id(output_directory: &str, base_prefix: &str) -> i32 {
+    let mut highest_count = -1i32;
+    if let Ok(entries) = std::fs::read_dir(output_directory) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if stem.starts_with(base_prefix) {
+                    let suffix = stem.trim_start_matches(base_prefix);
+                    let numeric_part = suffix.split('_').next().unwrap_or("");
+                    if let Ok(num) = numeric_part.parse::<i32>() {
+                        highest_count = highest_count.max(num);
+                    } else {
+                        println!("failed to parse session ID '{}' for file '{}'", numeric_part, stem);
+                    }
+                }
+            }
+        }
+    }
+
+    highest_count + 1
 }

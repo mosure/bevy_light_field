@@ -24,11 +24,17 @@ use retina::{
     },
     codec::VideoFrame,
 };
-use tokio::runtime::{
-    Handle,
-    Runtime,
+use tokio::{
+    fs::File,
+    runtime::{
+        Handle,
+        Runtime,
+    },
+    sync::mpsc,
 };
 use url::Url;
+
+use crate::mp4::Mp4Writer;
 
 
 pub struct RtspStreamPlugin;
@@ -97,12 +103,20 @@ pub fn apply_decode(
 #[derive(Debug, Clone, Copy, PartialEq, Reflect)]
 pub struct StreamId(pub usize);
 
-#[derive(Debug, Component, Clone)]
+#[derive(Debug)]
+pub enum RecordingCommand {
+    StartRecording(File),
+    StopRecording,
+}
+
+
+#[derive(Component, Clone)]
 pub struct RtspStreamDescriptor {
     pub uri: String,
     pub id: StreamId,
     pub image: bevy::asset::Handle<Image>,
     latest_frame: Arc<Mutex<Option<Bgra8Frame>>>,
+    recording_sender: Arc<Mutex<Option<mpsc::Sender<RecordingCommand>>>>,
 }
 
 impl RtspStreamDescriptor {
@@ -116,6 +130,7 @@ impl RtspStreamDescriptor {
             id,
             image,
             latest_frame: Arc::new(Mutex::new(None)),
+            recording_sender: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -127,6 +142,7 @@ impl RtspStreamDescriptor {
         self.image.clone()
     }
 }
+
 
 #[derive(Component)]
 struct RtspStreamCreated;
@@ -182,6 +198,33 @@ impl RtspStreamManager {
             }
         });
     }
+
+    pub fn start_recording(&self, output_directory: &str, prefix: &str) {
+        let stream_descriptors = self.stream_descriptors.lock().unwrap();
+        for descriptor in stream_descriptors.iter() {
+            let filepath = format!("{}/{}_{}.mp4", output_directory, prefix, descriptor.id.0);
+
+            let send_channel = descriptor.recording_sender.lock().unwrap();
+            let sender_clone = send_channel.as_ref().unwrap().clone();
+
+            self.handle.block_on(async move {
+                let file = File::create(&filepath).await.unwrap();
+                sender_clone.send(RecordingCommand::StartRecording(file)).await.unwrap();
+            });
+        }
+    }
+
+    pub fn stop_recording(&self) {
+        let stream_descriptors = self.stream_descriptors.lock().unwrap();
+        for descriptor in stream_descriptors.iter() {
+            let send_channel = descriptor.recording_sender.lock().unwrap();
+            let sender_clone = send_channel.as_ref().unwrap().clone();
+
+            self.handle.block_on(async move {
+                sender_clone.send(RecordingCommand::StopRecording).await.unwrap();
+            });
+        }
+    }
 }
 
 
@@ -190,6 +233,7 @@ pub struct RtspStream {
     pub descriptor: RtspStreamDescriptor,
     decoder: Option<Decoder>,
     demuxed: Option<Demuxed>,
+    writer: Option<Mp4Writer<File>>,
 }
 
 impl RtspStream {
@@ -201,15 +245,56 @@ impl RtspStream {
             descriptor,
             decoder,
             demuxed: None,
+            writer: None,
         }
     }
 
     async fn run(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>{
-        let session = create_session(&self.descriptor.uri).await?;
+        let (session, stream_idx) = create_session(&self.descriptor.uri).await?;
         self.demuxed = session.demuxed()?.into();
+
+        let (sender, mut receiver) = mpsc::channel(1);
+
+        {
+            let mut send_channel = self.descriptor.recording_sender.lock().unwrap();
+            *send_channel = sender.into();
+        }
 
         loop {
             let frame = self.capture_frame().await?;
+
+            if let Some(command) = receiver.try_recv().ok() {
+                match command {
+                    RecordingCommand::StartRecording(file) => {
+                        if let Some(writer) = self.writer.take() {
+                            writer.finish().await.ok();
+                        }
+
+                        self.writer = Mp4Writer::new(
+                            None,
+                            true,
+                            file,
+                        ).await.ok();
+
+                        println!("writing stream {}", self.descriptor.id.0);
+                    },
+                    RecordingCommand::StopRecording => {
+                        if let Some(writer) = self.writer.take() {
+                            println!("stopped recording stream {}", self.descriptor.id.0);
+                            writer.finish().await.ok();
+                        }
+                    },
+                }
+            }
+
+            {
+                if let Some(writer) = self.writer.as_mut() {
+                    writer.video(
+                        &self.demuxed.as_mut().unwrap().streams()[stream_idx],
+                        &frame,
+                    ).await?;
+                }
+            }
 
             let mut data = frame.into_data();
             convert_h264(&mut data)?;
@@ -266,7 +351,10 @@ impl RtspStream {
 }
 
 
-async fn create_session(url: &str) -> Result<Session<Playing>, Box<dyn std::error::Error + Send + Sync>> {
+async fn create_session(url: &str) -> Result<
+    (Session<Playing>, usize),
+    Box<dyn std::error::Error + Send + Sync>
+> {
     let parsed_url = Url::parse(url)?;
 
     let username = parsed_url.username();
@@ -312,7 +400,7 @@ async fn create_session(url: &str) -> Result<Session<Playing>, Box<dyn std::erro
             .enforce_timestamps_with_max_jump_secs(NonZeroU32::new(10).unwrap())
     ).await?;
 
-    Ok(described)
+    Ok((described, video_stream_index))
 }
 
 

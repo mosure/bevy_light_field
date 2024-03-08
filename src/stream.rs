@@ -225,8 +225,8 @@ impl RtspStream {
                                 assert_eq!(u32::from(sink.width), image_size.0 as u32, "frame width mismatch - stream size changes are not supported yet.");
                                 assert_eq!(u32::from(sink.height), image_size.1 as u32, "frame height mismatch - stream size changes are not supported yet.");
 
-                                let mut data = sink.data.as_mut();
-                                frame.write_rgba8(&mut data);
+                                let data = sink.data.as_mut();
+                                frame.write_rgba8(data);
                             },
                             None => {
                                 let mut data = vec![0; image_size.0 * image_size.1 * 4];

@@ -122,7 +122,8 @@ the viewer opens a window and displays the light field camera array, with post-p
 ## capabilities
 
 - [X] grid view of light field camera array
-- [ ] stream to files with recording controls
+- [ ] stream to files with recording controls (nersemble format)
+- [ ] playback nersemble recordings with annotations
 - [ ] person segmentation post-process (batch across streams)
 - [ ] camera array calibration
 - [ ] 3d reconstruction dataset preparation

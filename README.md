@@ -136,7 +136,7 @@ it is useful to test the light field viewer with emulated camera streams
 
 - install https://obsproject.com/
 - install rtsp plugin https://github.com/iamscottxu/obs-rtspserver/releases
-- Tools > RTSP Server > Start Server
+- tools > rtsp server > start server
 
 
 ## compatible bevy versions

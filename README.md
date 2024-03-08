@@ -121,7 +121,8 @@ the viewer opens a window and displays the light field camera array, with post-p
 
 ## capabilities
 
-- [ ] grid view of light field camera array
+- [X] grid view of light field camera array
+- [ ] stream to files with recording controls
 - [ ] person segmentation post-process (batch across streams)
 - [ ] camera array calibration
 - [ ] 3d reconstruction dataset preparation

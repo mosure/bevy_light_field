@@ -10,7 +10,25 @@
 rust bevy light field camera array tooling
 
 
-## example
+## capabilities
+
+- [X] grid view of light field camera array
+- [ ] stream to files with recording controls (nersemble format)
+- [ ] playback nersemble recordings with annotations
+- [ ] person segmentation post-process (batch across streams)
+- [ ] camera array calibration
+- [ ] 3d reconstruction dataset preparation
+- [ ] real-time 3d reconstruction viewer
+
+
+## run the viewer
+
+`cargo run -- --help`
+
+the viewer opens a window and displays the light field camera array, with post-process options
+
+
+## library usage
 
 ```rust
 use bevy::{
@@ -43,7 +61,6 @@ fn main() {
             RtspStreamPlugin,
         ))
         .add_systems(Startup, create_streams)
-        .add_systems(Startup, setup_camera)
         .run();
 }
 
@@ -99,35 +116,7 @@ fn create_streams(
             commands.entity(entity).insert(rtsp_stream);
         });
 }
-
-fn setup_camera(
-    mut commands: Commands,
-) {
-    commands.spawn((
-        Camera2dBundle {
-            ..default()
-        },
-    ));
-}
 ```
-
-
-## run the viewer
-
-`cargo run -- --help`
-
-the viewer opens a window and displays the light field camera array, with post-process options
-
-
-## capabilities
-
-- [X] grid view of light field camera array
-- [ ] stream to files with recording controls (nersemble format)
-- [ ] playback nersemble recordings with annotations
-- [ ] person segmentation post-process (batch across streams)
-- [ ] camera array calibration
-- [ ] 3d reconstruction dataset preparation
-- [ ] real-time 3d reconstruction viewer
 
 
 ## light field camera array

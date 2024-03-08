@@ -34,7 +34,7 @@ jobs:
       run: cargo clippy -- -Dwarnings
 
     - name: build
-      run: cargo build --example=minimal
+      run: cargo build
 
     # - name: build (web)
     #   run: cargo build --example=minimal --target wasm32-unknown-unknown --release

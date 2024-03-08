@@ -176,7 +176,10 @@ impl RtspStreamManager {
 
         self.handle.spawn(async move {
             let mut stream = stream;
-            let _ = stream.run().await;
+            loop {
+                // TODO: print connection errors
+                let _ = stream.run().await;
+            }
         });
     }
 }

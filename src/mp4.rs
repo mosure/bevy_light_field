@@ -4,7 +4,6 @@ use anyhow::{anyhow, bail, Error};
 use bytes::{Buf, BufMut, BytesMut};
 use retina::codec::{AudioParameters, ParametersRef, VideoParameters};
 
-use std::convert::TryFrom;
 use std::io::SeekFrom;
 use tokio::io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 

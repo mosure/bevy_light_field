@@ -30,11 +30,35 @@ jobs:
       with:
         toolchain: ${{ matrix.rust-toolchain }}
 
+    - name: Install ONNX Runtime on Windows
+      if: matrix.os == 'windows-latest'
+      run: |
+        Invoke-WebRequest -Uri "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-win-x64-1.17.1.zip" -OutFile "onnxruntime.zip"
+        Expand-Archive -Path "onnxruntime.zip" -DestinationPath "$env:RUNNER_TEMP"
+        echo "ONNXRUNTIME_DIR=$env:RUNNER_TEMP\onnxruntime-win-x64-1.17.1" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
+
+    - name: Install ONNX Runtime on macOS
+      if: matrix.os == 'macos-latest'
+      run: |
+        curl -L "https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-osx-x86_64-1.17.1.tgz" -o "onnxruntime.tgz"
+        mkdir -p $HOME/onnxruntime
+        tar -xzf onnxruntime.tgz -C $HOME/onnxruntime
+        echo "ONNXRUNTIME_DIR=$HOME/onnxruntime/onnxruntime-osx-x86_64-1.17.1" >> $GITHUB_ENV
+
+
+    - name: Set ONNX Runtime library path for macOS
+      if: matrix.os == 'macos-latest'
+      run: echo "ORT_DYLIB_PATH=$ONNXRUNTIME_DIR/libonnxruntime.dylib" >> $GITHUB_ENV
+
+    - name: Set ONNX Runtime library path for Windows
+      if: matrix.os == 'windows-latest'
+      run: echo "ORT_DYLIB_PATH=$ONNXRUNTIME_DIR/onnxruntime.dll" >> $GITHUB_ENV
+
+
     - name: lint
       run: cargo clippy -- -Dwarnings
 
     - name: build
-      run: cargo build
-
-    # - name: build (web)
-    #   run: cargo build --example=minimal --target wasm32-unknown-unknown --release
+      run: cargo build --features "ort/load-dynamic"
+      env:
+        ORT_DYLIB_PATH: ${{ env.ORT_DYLIB_PATH }}

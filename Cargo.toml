@@ -25,12 +25,21 @@ exclude = [
 
 default-run = "viewer"
 
+[features]
+default = [
+  "person_matting",
+]
+
+person_matting = ["bevy_ort", "ort", "ndarray"]
+
 
 [dependencies]
 anyhow = "1.0"
 async-compat = "0.2"
-bytes = "1.5.0"
+bevy_ort = { version = "0.5", optional = true }
+bytes = "1.5"
 futures = "0.3"
+ndarray = { version = "0.15", optional = true }
 openh264 = "0.5"
 retina = "0.4"
 tokio = { version = "1.36", features = ["full"] }
@@ -47,6 +56,18 @@ features = [
   "bevy_ui",
   "bevy_winit",
   "multi-threaded",
+]
+
+
+[dependencies.ort]
+version = "2.0.0-alpha.4"
+optional = true
+default-features = false
+features = [
+  "cuda",
+  "load-dynamic",
+  "ndarray",
+  "openvino",
 ]
 
 

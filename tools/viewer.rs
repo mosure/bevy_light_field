@@ -18,6 +18,12 @@ use bevy_light_field::stream::{
     RtspStreamDescriptor, RtspStreamManager, RtspStreamPlugin, StreamId
 };
 
+#[cfg(feature = "person_matting")]
+use bevy_light_field::matting::{
+    MattedStream,
+    MattingPlugin,
+};
+
 
 const RTSP_URIS: [&str; 2] = [
     "rtsp://192.168.1.23/user=admin&password=admin123&channel=1&stream=0.sdp?",
@@ -44,6 +50,9 @@ fn main() {
                     ..default()
                 }),
             RtspStreamPlugin,
+
+            #[cfg(feature = "person_matting")]
+            MattingPlugin,
         ))
         .add_systems(Startup, create_streams)
         .add_systems(Startup, setup_camera)
@@ -65,6 +74,13 @@ fn create_streams(
     primary_window: Query<&Window, With<PrimaryWindow>>,
 ) {
     let window = primary_window.single();
+
+    #[cfg(feature = "person_matting")]
+    let elements = RTSP_URIS.len() * 2;
+
+    #[cfg(not(feature = "person_matting"))]
+    let elements = RTSP_URIS.len();
+
     let (
         columns,
         rows,
@@ -73,19 +89,19 @@ fn create_streams(
     ) = calculate_grid_dimensions(
         window.width(),
         window.height(),
-        RTSP_URIS.len()
+        elements,
     );
 
-    let images: Vec<Handle<Image>> = RTSP_URIS.iter()
+    let size = Extent3d {
+        width: 32,
+        height: 32,
+        ..default()
+    };
+
+    let input_images: Vec<Handle<Image>> = RTSP_URIS.iter()
         .enumerate()
         .map(|(index, &url)| {
             let entity = commands.spawn_empty().id();
-
-            let size = Extent3d {
-                width: 32,
-                height: 32,
-                ..default()
-            };
 
             let mut image = Image {
                 asset_usage: RenderAssetUsages::all(),
@@ -120,6 +136,38 @@ fn create_streams(
         })
         .collect();
 
+    let output_images = input_images.iter()
+        .enumerate()
+        .map(|(index, image)| {
+            let mut output_image = Image {
+                asset_usage: RenderAssetUsages::all(),
+                texture_descriptor: TextureDescriptor {
+                    label: None,
+                    size,
+                    dimension: TextureDimension::D2,
+                    format: TextureFormat::Rgba8UnormSrgb,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    usage: TextureUsages::COPY_DST
+                        | TextureUsages::TEXTURE_BINDING
+                        | TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[TextureFormat::Rgba8UnormSrgb],
+                },
+                ..default()
+            };
+            output_image.resize(size);
+            let output_image = images.add(output_image);
+
+            commands.spawn(MattedStream {
+                stream_id: StreamId(index),
+                input: image.clone(),
+                output: output_image.clone(),
+            });
+
+            output_image
+        })
+        .collect::<Vec<_>>();
+
     commands.spawn(NodeBundle {
         style: Style {
             display: Display::Grid,
@@ -133,15 +181,26 @@ fn create_streams(
         ..default()
     })
     .with_children(|builder| {
-        images.iter()
-            .for_each(|image| {
+        input_images.iter()
+            .zip(output_images.iter())
+            .for_each(|(input, output)| {
                 builder.spawn(ImageBundle {
                     style: Style {
                         width: Val::Px(sprite_width),
                         height: Val::Px(sprite_height),
                         ..default()
                     },
-                    image: UiImage::new(image.clone()),
+                    image: UiImage::new(input.clone()),
+                    ..default()
+                });
+
+                builder.spawn(ImageBundle {
+                    style: Style {
+                        width: Val::Px(sprite_width),
+                        height: Val::Px(sprite_height),
+                        ..default()
+                    },
+                    image: UiImage::new(output.clone()),
                     ..default()
                 });
             });

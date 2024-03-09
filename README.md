@@ -14,8 +14,10 @@ rust bevy light field camera array tooling
 
 - [X] grid view of light field camera array
 - [X] stream to files with recording controls
+- [X] person segmentation post-process (batch across streams)
+- [X] async segmentation model inference
+- [ ] foreground extraction post-process and visualization mode
 - [ ] playback nersemble recordings with annotations
-- [ ] person segmentation post-process (batch across streams)
 - [ ] camera array calibration
 - [ ] 3d reconstruction dataset preparation
 - [ ] real-time 3d reconstruction viewer
@@ -26,6 +28,11 @@ rust bevy light field camera array tooling
 `cargo run -- --help`
 
 the viewer opens a window and displays the light field camera array, with post-process options
+
+> see execution provider [bevy_ort documentation](https://github.com/mosure/bevy_ort?tab=readme-ov-file#run-the-example-person-segmentation-model-modnet) for better performance
+
+- windows: `cargo run --release --features "ort/cuda"`
+
 
 ### controls
 
@@ -156,5 +163,6 @@ it is useful to test the light field viewer with emulated camera streams
 ## credits
 - [bevy_video](https://github.com/PortalCloudInc/bevy_video)
 - [gaussian_avatars](https://github.com/ShenhanQian/GaussianAvatars)
+- [modnet](https://github.com/ZHKKKe/MODNet)
 - [nersemble](https://github.com/tobias-kirschstein/nersemble)
 - [paddle_seg_matting](https://github.com/PaddlePaddle/PaddleSeg/blob/release/2.9/Matting/docs/quick_start_en.md)

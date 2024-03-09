@@ -18,3 +18,4 @@ www/assets/
 *.mp4
 
 mediamtx/
+onnxruntime/

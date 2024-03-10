@@ -166,3 +166,4 @@ it is useful to test the light field viewer with emulated camera streams
 - [modnet](https://github.com/ZHKKKe/MODNet)
 - [nersemble](https://github.com/tobias-kirschstein/nersemble)
 - [paddle_seg_matting](https://github.com/PaddlePaddle/PaddleSeg/blob/release/2.9/Matting/docs/quick_start_en.md)
+- [ray diffusion](https://github.com/jasonyzhang/RayDiffusion)

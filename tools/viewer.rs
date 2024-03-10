@@ -1,6 +1,10 @@
 use bevy::{
     prelude::*,
     app::AppExit,
+    diagnostic::{
+        DiagnosticsStore,
+        FrameTimeDiagnosticsPlugin,
+    },
     render::{
         render_asset::RenderAssetUsages,
         render_resource::{
@@ -13,9 +17,20 @@ use bevy::{
     },
     window::PrimaryWindow,
 };
+use bevy_args::{
+    parse_args,
+    BevyArgsPlugin,
+    Deserialize,
+    Parser,
+    Serialize,
+};
 
-use bevy_light_field::stream::{
-    RtspStreamDescriptor, RtspStreamManager, RtspStreamPlugin, StreamId
+use bevy_light_field::{
+    LightFieldPlugin,
+    materials::foreground::ForegroundMaterial,
+    stream::{
+        RtspStreamDescriptor, RtspStreamManager, StreamId
+    },
 };
 
 #[cfg(feature = "person_matting")]
@@ -25,34 +40,87 @@ use bevy_light_field::matting::{
 };
 
 
-const RTSP_URIS: [&str; 2] = [
+const RTSP_URIS: [&str; 10] = [
+    "rtsp://192.168.1.23/user=admin&password=admin123&channel=1&stream=0.sdp?",
+    "rtsp://192.168.1.24/user=admin&password=admin123&channel=1&stream=0.sdp?",
+
+    "rtsp://192.168.1.23/user=admin&password=admin123&channel=1&stream=0.sdp?",
+    "rtsp://192.168.1.24/user=admin&password=admin123&channel=1&stream=0.sdp?",
+    "rtsp://192.168.1.23/user=admin&password=admin123&channel=1&stream=0.sdp?",
+    "rtsp://192.168.1.24/user=admin&password=admin123&channel=1&stream=0.sdp?",
+    "rtsp://192.168.1.23/user=admin&password=admin123&channel=1&stream=0.sdp?",
+    "rtsp://192.168.1.24/user=admin&password=admin123&channel=1&stream=0.sdp?",
     "rtsp://192.168.1.23/user=admin&password=admin123&channel=1&stream=0.sdp?",
     "rtsp://192.168.1.24/user=admin&password=admin123&channel=1&stream=0.sdp?",
 ];
 
 
-// TODO: add bevy_args
+#[derive(
+    Default,
+    Debug,
+    Resource,
+    Serialize,
+    Deserialize,
+    Parser,
+)]
+#[command(about = "bevy_light_field viewer", version)]
+pub struct LightFieldViewer {
+    #[arg(long, default_value = "false")]
+    pub show_fps: bool,
+
+    #[arg(long, default_value = "false")]
+    pub fullscreen: bool,
+
+    #[arg(long, default_value = "1920.0")]
+    pub width: f32,
+    #[arg(long, default_value = "1080.0")]
+    pub height: f32,
+
+    #[arg(long, default_value = "512")]
+    pub max_matting_width: u32,
+    #[arg(long, default_value = "512")]
+    pub max_matting_height: u32,
+
+    #[arg(long, default_value = "false")]
+    pub extract_foreground: bool,
+}
+
+
+
 fn main() {
+    let args = parse_args::<LightFieldViewer>();
+
+    let mode = if args.fullscreen {
+        bevy::window::WindowMode::BorderlessFullscreen
+    } else {
+        bevy::window::WindowMode::Windowed
+    };
+
     let primary_window = Some(Window {
-        mode: bevy::window::WindowMode::Windowed,
+        mode,
         prevent_default_event_handling: false,
-        resolution: (1920.0, 1080.0).into(),
+        resolution: (args.width, args.height).into(),
         title: "bevy_light_field - rtsp viewer".to_string(),
         present_mode: bevy::window::PresentMode::AutoVsync,
         ..default()
     });
 
-    App::new()
+    let mut app = App::new();
+    app
+        .add_plugins(BevyArgsPlugin::<LightFieldViewer>::default())
         .add_plugins((
             DefaultPlugins
                 .set(WindowPlugin {
                     primary_window,
                     ..default()
                 }),
-            RtspStreamPlugin,
+            LightFieldPlugin,
 
             #[cfg(feature = "person_matting")]
-            MattingPlugin,
+            MattingPlugin::new((
+                args.max_matting_width,
+                args.max_matting_height,
+            )),
         ))
         .add_systems(Startup, create_streams)
         .add_systems(Startup, setup_camera)
@@ -63,8 +131,15 @@ fn main() {
                 press_r_start_recording,
                 press_s_stop_recording
             )
-        )
-        .run();
+        );
+
+    if args.show_fps {
+        app.add_plugins(FrameTimeDiagnosticsPlugin);
+        app.add_systems(Startup, fps_display_setup.after(create_streams));
+        app.add_systems(Update, fps_update_system);
+    }
+
+    app.run();
 }
 
 
@@ -72,20 +147,17 @@ fn create_streams(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     primary_window: Query<&Window, With<PrimaryWindow>>,
+    args: Res<LightFieldViewer>,
+    mut foreground_materials: ResMut<Assets<ForegroundMaterial>>,
 ) {
     let window = primary_window.single();
-
-    #[cfg(feature = "person_matting")]
-    let elements = RTSP_URIS.len() * 2;
-
-    #[cfg(not(feature = "person_matting"))]
     let elements = RTSP_URIS.len();
 
     let (
         columns,
         rows,
-        sprite_width,
-        sprite_height,
+        _sprite_width,
+        _sprite_height,
     ) = calculate_grid_dimensions(
         window.width(),
         window.height(),
@@ -136,16 +208,16 @@ fn create_streams(
         })
         .collect();
 
-    let output_images = input_images.iter()
+    let mask_images = input_images.iter()
         .enumerate()
         .map(|(index, image)| {
-            let mut output_image = Image {
+            let mut mask_images = Image {
                 asset_usage: RenderAssetUsages::all(),
                 texture_descriptor: TextureDescriptor {
                     label: None,
                     size,
                     dimension: TextureDimension::D2,
-                    format: TextureFormat::Rgba8UnormSrgb,
+                    format: TextureFormat::Rgba8UnormSrgb,  // TODO: use R8 format
                     mip_level_count: 1,
                     sample_count: 1,
                     usage: TextureUsages::COPY_DST
@@ -155,16 +227,29 @@ fn create_streams(
                 },
                 ..default()
             };
-            output_image.resize(size);
-            let output_image = images.add(output_image);
+            mask_images.resize(size);
+            let mask_image = images.add(mask_images);
 
-            commands.spawn(MattedStream {
-                stream_id: StreamId(index),
-                input: image.clone(),
-                output: output_image.clone(),
-            });
+            let mut material = None;
 
-            output_image
+            #[cfg(feature = "person_matting")]
+            if args.extract_foreground {
+                let foreground_mat = foreground_materials.add(ForegroundMaterial {
+                    input: image.clone(),
+                    mask: mask_image.clone(),
+                });
+
+                commands.spawn(MattedStream {
+                    stream_id: StreamId(index),
+                    input: image.clone(),
+                    output: mask_image.clone(),
+                    material: foreground_mat.clone(),
+                });
+
+                material = foreground_mat.into();
+            }
+
+            (mask_image, material)
         })
         .collect::<Vec<_>>();
 
@@ -177,32 +262,34 @@ fn create_streams(
             grid_template_rows: RepeatedGridTrack::flex(rows as u16, 1.0),
             ..default()
         },
-        background_color: BackgroundColor(Color::DARK_GRAY),
+        background_color: BackgroundColor(Color::BLACK),
         ..default()
     })
     .with_children(|builder| {
         input_images.iter()
-            .zip(output_images.iter())
-            .for_each(|(input, output)| {
-                builder.spawn(ImageBundle {
-                    style: Style {
-                        width: Val::Px(sprite_width),
-                        height: Val::Px(sprite_height),
+            .zip(mask_images.iter())
+            .for_each(|(input, (_mask, material))| {
+                if args.extract_foreground {
+                    builder.spawn(MaterialNodeBundle {
+                        style: Style {
+                            width: Val::Percent(100.0),
+                            height: Val::Percent(100.0),
+                            ..default()
+                        },
+                        material: material.clone().unwrap(),
                         ..default()
-                    },
-                    image: UiImage::new(input.clone()),
-                    ..default()
-                });
-
-                builder.spawn(ImageBundle {
-                    style: Style {
-                        width: Val::Px(sprite_width),
-                        height: Val::Px(sprite_height),
+                    });
+                } else {
+                    builder.spawn(ImageBundle {
+                        style: Style {
+                            width: Val::Percent(100.0),
+                            height: Val::Percent(100.0),
+                            ..default()
+                        },
+                        image: UiImage::new(input.clone()),
                         ..default()
-                    },
-                    image: UiImage::new(output.clone()),
-                    ..default()
-                });
+                    });
+                }
             });
     });
 }
@@ -313,4 +400,52 @@ fn get_next_session_id(output_directory: &str, base_prefix: &str) -> i32 {
     }
 
     highest_count + 1
+}
+
+
+
+fn fps_display_setup(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+) {
+    commands.spawn((
+        TextBundle::from_sections([
+            TextSection::new(
+                "fps: ",
+                TextStyle {
+                    font: asset_server.load("fonts/Caveat-Bold.ttf"),
+                    font_size: 60.0,
+                    color: Color::WHITE,
+                },
+            ),
+            TextSection::from_style(TextStyle {
+                font: asset_server.load("fonts/Caveat-Medium.ttf"),
+                font_size: 60.0,
+                color: Color::GOLD,
+            }),
+        ]).with_style(Style {
+            position_type: PositionType::Absolute,
+            width: Val::Px(200.0),
+            bottom: Val::Px(5.0),
+            right: Val::Px(15.0),
+            ..default()
+        }),
+        FpsText,
+    ));
+}
+
+#[derive(Component)]
+struct FpsText;
+
+fn fps_update_system(
+    diagnostics: Res<DiagnosticsStore>,
+    mut query: Query<&mut Text, With<FpsText>>,
+) {
+    for mut text in &mut query {
+        if let Some(fps) = diagnostics.get(&FrameTimeDiagnosticsPlugin::FPS) {
+            if let Some(value) = fps.smoothed() {
+                text.sections[1].value = format!("{:.2}", value);
+            }
+        }
+    }
 }

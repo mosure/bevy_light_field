@@ -13,7 +13,10 @@ use bevy_ort::{
     Onnx,
 };
 
-use crate::stream::StreamId;
+use crate::{
+    materials::foreground::ForegroundMaterial,
+    stream::StreamId,
+};
 
 
 #[derive(Component, Clone, Debug, Reflect)]
@@ -21,15 +24,31 @@ pub struct MattedStream {
     pub stream_id: StreamId,
     pub input: Handle<Image>,
     pub output: Handle<Image>,
+    pub material: Handle<ForegroundMaterial>,
 }
 
 
-pub struct MattingPlugin;
+#[derive(Resource, Default, Clone)]
+pub struct InferenceSize(pub (u32, u32));
+
+pub struct MattingPlugin {
+    pub max_inference_size: InferenceSize,
+}
+
+impl MattingPlugin {
+    pub fn new(max_inference_size: (u32, u32)) -> Self {
+        MattingPlugin {
+            max_inference_size: InferenceSize(max_inference_size),
+        }
+    }
+}
+
 impl Plugin for MattingPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(BevyOrtPlugin);
         app.register_type::<MattedStream>();
         app.init_resource::<Modnet>();
+        app.insert_resource(self.max_inference_size.clone());
         app.add_systems(Startup, load_modnet);
         app.add_systems(Update, matting_inference);
     }
@@ -67,6 +86,7 @@ fn matting_inference(
     >,
     onnx_assets: Res<Assets<Onnx>>,
     mut pipeline_local: Local<ModnetComputePipeline>,
+    inference_size: Res<InferenceSize>,
 ) {
     if let Some(pipeline) = pipeline_local.0.as_mut() {
         if let Some(mut commands_queue) = block_on(future::poll_once(pipeline)) {
@@ -74,6 +94,10 @@ fn matting_inference(
             pipeline_local.0 = None;
         }
 
+        return;
+    }
+
+    if matted_streams.is_empty() {
         return;
     }
 
@@ -90,10 +114,9 @@ fn matting_inference(
         return;
     }
 
-    let max_inference_size = (256, 256).into();
     let input = images_to_modnet_input(
-        inputs,
-        max_inference_size,
+        inputs.as_slice(),
+        inference_size.0.into(),
     );
 
     if onnx_assets.get(&modnet.onnx).is_none() {
@@ -104,7 +127,7 @@ fn matting_inference(
     let session_arc = onnx.session.clone();
 
     let outputs = matted_streams.iter()
-        .map(|(_, matted_stream)| matted_stream.output.clone())
+        .map(|(_, matted_stream)| (matted_stream.output.clone(), matted_stream.material.clone()))
         .collect::<Vec<_>>();
 
     let task = thread_pool.spawn(async move {
@@ -126,11 +149,13 @@ fn matting_inference(
                 let mut command_queue = CommandQueue::default();
 
                 command_queue.push(move |world: &mut World| {
-                    let mut images = world.get_resource_mut::<Assets<Image>>().unwrap();
-
                     outputs.iter()
-                        .for_each(|output| {
-                            images.insert(output, mask_images.pop().unwrap());
+                        .for_each(|(mask, material)| {
+                            let mut images = world.get_resource_mut::<Assets<Image>>().unwrap();
+                            images.insert(mask, mask_images.pop().unwrap());
+
+                            let mut foreground_materials = world.get_resource_mut::<Assets<ForegroundMaterial>>().unwrap();
+                            foreground_materials.get_mut(material).unwrap();
                         });
                 });
 

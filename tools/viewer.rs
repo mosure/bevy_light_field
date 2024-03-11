@@ -40,18 +40,17 @@ use bevy_light_field::matting::{
 };
 
 
-const RTSP_URIS: [&str; 10] = [
+// TODO: move to config file
+const RTSP_URIS: [&str; 8] = [
     "rtsp://192.168.1.23/user=admin&password=admin123&channel=1&stream=0.sdp?",
     "rtsp://192.168.1.24/user=admin&password=admin123&channel=1&stream=0.sdp?",
 
-    "rtsp://192.168.1.23/user=admin&password=admin123&channel=1&stream=0.sdp?",
-    "rtsp://192.168.1.24/user=admin&password=admin123&channel=1&stream=0.sdp?",
-    "rtsp://192.168.1.23/user=admin&password=admin123&channel=1&stream=0.sdp?",
-    "rtsp://192.168.1.24/user=admin&password=admin123&channel=1&stream=0.sdp?",
-    "rtsp://192.168.1.23/user=admin&password=admin123&channel=1&stream=0.sdp?",
-    "rtsp://192.168.1.24/user=admin&password=admin123&channel=1&stream=0.sdp?",
-    "rtsp://192.168.1.23/user=admin&password=admin123&channel=1&stream=0.sdp?",
-    "rtsp://192.168.1.24/user=admin&password=admin123&channel=1&stream=0.sdp?",
+    "rtsp://192.168.1.25/user=admin&password=admin123&channel=1&stream=0.sdp?",
+    "rtsp://192.168.1.26/user=admin&password=admin123&channel=1&stream=0.sdp?",
+    "rtsp://192.168.1.27/user=admin&password=admin123&channel=1&stream=0.sdp?",
+    "rtsp://192.168.1.28/user=admin&password=admin123&channel=1&stream=0.sdp?",
+    "rtsp://192.168.1.29/user=admin&password=admin123&channel=1&stream=0.sdp?",
+    "rtsp://192.168.1.30/user=admin&password=admin123&channel=1&stream=0.sdp?",
 ];
 
 

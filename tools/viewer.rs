@@ -313,20 +313,16 @@ fn press_r_start_recording(
     stream_manager: Res<RtspStreamManager>
 ) {
     if keys.just_pressed(KeyCode::KeyR) {
+
         let output_directory = "capture";
-        std::fs::create_dir_all(output_directory).unwrap();
+        let session_id = get_next_session_id(output_directory);
+        let output_directory = format!("{}/{}", output_directory, session_id);
 
-        let base_prefix = "bevy_light_field_";
-
-        let prefix = format!(
-            "{}{:03}",
-            base_prefix,
-            get_next_session_id(output_directory, base_prefix)
-        );
+        std::fs::create_dir_all(&output_directory).unwrap();
 
         stream_manager.start_recording(
-            output_directory,
-            &prefix,
+            &output_directory,
+            "bevy_light_field",
         );
     }
 }
@@ -374,28 +370,21 @@ fn calculate_grid_dimensions(window_width: f32, window_height: f32, num_streams:
 }
 
 
-fn get_next_session_id(output_directory: &str, base_prefix: &str) -> i32 {
-    let mut highest_count = -1i32;
-    if let Ok(entries) = std::fs::read_dir(output_directory) {
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if stem.starts_with(base_prefix) {
-                    let suffix = stem.trim_start_matches(base_prefix);
-                    let numeric_part = suffix.split('_').next().unwrap_or("");
-                    if let Ok(num) = numeric_part.parse::<i32>() {
-                        highest_count = highest_count.max(num);
-                    } else {
-                        println!("failed to parse session ID '{}' for file '{}'", numeric_part, stem);
-                    }
+fn get_next_session_id(output_directory: &str) -> i32 {
+    match std::fs::read_dir(output_directory) {
+        Ok(entries) => entries.filter_map(|entry| {
+            let entry = entry.ok()?;
+                if entry.path().is_dir() {
+                    entry.file_name().to_string_lossy().parse::<i32>().ok()
+                } else {
+                    None
                 }
-            }
-        }
+            })
+            .max()
+            .map_or(0, |max_id| max_id + 1),
+        Err(_) => 0,
     }
-
-    highest_count + 1
 }
-
 
 
 fn fps_display_setup(

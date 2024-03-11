@@ -103,11 +103,13 @@ fn matting_inference(
 
     let thread_pool = AsyncComputeTaskPool::get();
 
-    let inputs = matted_streams.iter()
+    let (inputs, outputs): (Vec<_>, Vec<_>) = matted_streams.iter()
         .map(|(_, matted_stream)| {
-            images.get(matted_stream.input.clone()).unwrap()
+            let input = images.get(matted_stream.input.clone()).unwrap();
+            let output = (matted_stream.output.clone(), matted_stream.material.clone());
+            (input, output)
         })
-        .collect::<Vec<_>>();
+        .unzip();
 
     let uninitialized = inputs.iter().any(|image| image.size() == (32, 32).into());
     if uninitialized {
@@ -126,10 +128,6 @@ fn matting_inference(
     let onnx = onnx_assets.get(&modnet.onnx).unwrap();
     let session_arc = onnx.session.clone();
 
-    let outputs = matted_streams.iter()
-        .map(|(_, matted_stream)| (matted_stream.output.clone(), matted_stream.material.clone()))
-        .collect::<Vec<_>>();
-
     let task = thread_pool.spawn(async move {
         let mask_images: Result<Vec<Image>, String> = (|| {
             let session_lock = session_arc.lock().map_err(|e| e.to_string())?;
@@ -145,18 +143,18 @@ fn matting_inference(
         })();
 
         match mask_images {
-            Ok(mut mask_images) => {
+            Ok(mask_images) => {
                 let mut command_queue = CommandQueue::default();
 
                 command_queue.push(move |world: &mut World| {
-                    outputs.iter()
-                        .for_each(|(mask, material)| {
-                            let mut images = world.get_resource_mut::<Assets<Image>>().unwrap();
-                            images.insert(mask, mask_images.pop().unwrap());
-
-                            let mut foreground_materials = world.get_resource_mut::<Assets<ForegroundMaterial>>().unwrap();
-                            foreground_materials.get_mut(material).unwrap();
+                    world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
+                        world.resource_scope(|_world, mut foreground_materials: Mut<Assets<ForegroundMaterial>>| {
+                            outputs.into_iter().zip(mask_images).for_each(|((output, material), mask_image)| {
+                                images.insert(output, mask_image);
+                                foreground_materials.get_mut(&material).unwrap();
+                            });
                         });
+                    });
                 });
 
                 command_queue

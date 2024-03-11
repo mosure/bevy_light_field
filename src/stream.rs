@@ -24,6 +24,7 @@ use retina::{
     },
     codec::VideoFrame,
 };
+use serde::{Deserialize, Serialize};
 use tokio::{
     fs::File,
     runtime::{
@@ -37,10 +38,17 @@ use url::Url;
 use crate::mp4::Mp4Writer;
 
 
-pub struct RtspStreamPlugin;
+pub struct RtspStreamPlugin {
+    pub stream_config: String,
+}
+
 impl Plugin for RtspStreamPlugin {
     fn build(&self, app: &mut App) {
+        let config = std::fs::File::open(&self.stream_config).unwrap();
+        let stream_uris = serde_json::from_reader::<_, StreamUris>(config).unwrap();
+
         app
+            .insert_resource(stream_uris)
             .init_resource::<RtspStreamManager>()
             .add_systems(Update, create_streams_from_descriptors)
             .add_systems(Update, apply_decode);
@@ -426,3 +434,8 @@ fn convert_h264(data: &mut [u8]) -> Result<(), Error> {
 
     Ok(())
 }
+
+
+
+#[derive(Resource, Clone, Debug, Default, Reflect, Serialize, Deserialize)]
+pub struct StreamUris(pub Vec<String>);

@@ -8,10 +8,15 @@ pub mod mp4;
 pub mod stream;
 
 
-pub struct LightFieldPlugin;
+pub struct LightFieldPlugin {
+    pub stream_config: String,
+}
+
 impl Plugin for LightFieldPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(materials::StreamMaterialsPlugin);
-        app.add_plugins(stream::RtspStreamPlugin);
+        app.add_plugins(stream::RtspStreamPlugin {
+            stream_config: self.stream_config.clone(),
+        });
     }
 }

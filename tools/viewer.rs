@@ -29,7 +29,10 @@ use bevy_light_field::{
     LightFieldPlugin,
     materials::foreground::ForegroundMaterial,
     stream::{
-        RtspStreamDescriptor, RtspStreamManager, StreamId
+        RtspStreamDescriptor,
+        RtspStreamManager,
+        StreamId,
+        StreamUris,
     },
 };
 
@@ -38,20 +41,6 @@ use bevy_light_field::matting::{
     MattedStream,
     MattingPlugin,
 };
-
-
-// TODO: move to config file
-const RTSP_URIS: [&str; 8] = [
-    "rtsp://192.168.1.23/user=admin&password=admin123&channel=1&stream=0.sdp?",
-    "rtsp://192.168.1.24/user=admin&password=admin123&channel=1&stream=0.sdp?",
-
-    "rtsp://192.168.1.25/user=admin&password=admin123&channel=1&stream=0.sdp?",
-    "rtsp://192.168.1.26/user=admin&password=admin123&channel=1&stream=0.sdp?",
-    "rtsp://192.168.1.27/user=admin&password=admin123&channel=1&stream=0.sdp?",
-    "rtsp://192.168.1.28/user=admin&password=admin123&channel=1&stream=0.sdp?",
-    "rtsp://192.168.1.29/user=admin&password=admin123&channel=1&stream=0.sdp?",
-    "rtsp://192.168.1.30/user=admin&password=admin123&channel=1&stream=0.sdp?",
-];
 
 
 #[derive(
@@ -64,6 +53,9 @@ const RTSP_URIS: [&str; 8] = [
 )]
 #[command(about = "bevy_light_field viewer", version)]
 pub struct LightFieldViewer {
+    #[arg(long, default_value = "assets/streams.json")]
+    pub config: String,
+
     #[arg(long, default_value = "false")]
     pub show_fps: bool,
 
@@ -113,7 +105,9 @@ fn main() {
                     primary_window,
                     ..default()
                 }),
-            LightFieldPlugin,
+            LightFieldPlugin {
+                stream_config: args.config.clone(),
+            },
 
             #[cfg(feature = "person_matting")]
             MattingPlugin::new((
@@ -148,9 +142,10 @@ fn create_streams(
     primary_window: Query<&Window, With<PrimaryWindow>>,
     args: Res<LightFieldViewer>,
     mut foreground_materials: ResMut<Assets<ForegroundMaterial>>,
+    stream_uris: Res<StreamUris>,
 ) {
     let window = primary_window.single();
-    let elements = RTSP_URIS.len();
+    let elements = stream_uris.0.len();
 
     let (
         columns,
@@ -169,15 +164,15 @@ fn create_streams(
         ..default()
     };
 
-    let input_images: Vec<Handle<Image>> = RTSP_URIS.iter()
+    let input_images: Vec<Handle<Image>> = stream_uris.0.iter()
         .enumerate()
-        .map(|(index, &url)| {
+        .map(|(index, url)| {
             let entity = commands.spawn_empty().id();
 
             let mut image = Image {
                 asset_usage: RenderAssetUsages::all(),
                 texture_descriptor: TextureDescriptor {
-                    label: Some(url),
+                    label: None,
                     size,
                     dimension: TextureDimension::D2,
                     format: TextureFormat::Rgba8UnormSrgb,

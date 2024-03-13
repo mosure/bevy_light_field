@@ -54,7 +54,7 @@ use bevy::{
 };
 
 use bevy_light_field::stream::{
-    RtspStreamDescriptor,
+    RtspStreamHandle,
     RtspStreamPlugin,
     StreamId,
 };
@@ -118,7 +118,7 @@ fn create_streams(
                 ..default()
             });
 
-            let rtsp_stream = RtspStreamDescriptor::new(
+            let rtsp_stream = RtspStreamHandle::new(
                 url.to_string(),
                 StreamId(index),
                 image,

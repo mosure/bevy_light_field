@@ -28,8 +28,14 @@ use bevy_args::{
 use bevy_light_field::{
     LightFieldPlugin,
     materials::foreground::ForegroundMaterial,
+    pipeline::{
+        PipelineConfig,
+        StreamSessionBundle,
+        Session,
+        RawStreams,
+    },
     stream::{
-        RtspStreamDescriptor,
+        RtspStreamHandle,
         RtspStreamManager,
         StreamId,
         StreamUris,
@@ -58,6 +64,9 @@ pub struct LightFieldViewer {
 
     #[arg(long, default_value = "false")]
     pub show_fps: bool,
+
+    #[arg(long, default_value = "false")]
+    pub automatic_recording: bool,
 
     #[arg(long, default_value = "false")]
     pub fullscreen: bool,
@@ -115,6 +124,7 @@ fn main() {
                 args.max_matting_height,
             )),
         ))
+        .init_resource::<LiveSession>()
         .add_systems(Startup, create_streams)
         .add_systems(Startup, setup_camera)
         .add_systems(
@@ -164,9 +174,11 @@ fn create_streams(
         ..default()
     };
 
+    // TODO: support enabling/disabling decoding/matting per stream (e.g. during 'record mode')
+
     let input_images: Vec<Handle<Image>> = stream_uris.0.iter()
         .enumerate()
-        .map(|(index, url)| {
+        .map(|(index, descriptor)| {
             let entity = commands.spawn_empty().id();
 
             let mut image = Image {
@@ -190,8 +202,8 @@ fn create_streams(
             let image = images.add(image);
             let image_clone = image.clone();
 
-            let rtsp_stream = RtspStreamDescriptor::new(
-                url.to_string(),
+            let rtsp_stream = RtspStreamHandle::new(
+                descriptor.clone(),
                 StreamId(index),
                 image,
             );
@@ -227,7 +239,7 @@ fn create_streams(
             let mut material = None;
 
             #[cfg(feature = "person_matting")]
-            if args.extract_foreground {
+            if args.extract_foreground || (args.automatic_recording && index == 0) {
                 let foreground_mat = foreground_materials.add(ForegroundMaterial {
                     input: image.clone(),
                     mask: mask_image.clone(),
@@ -262,8 +274,9 @@ fn create_streams(
     .with_children(|builder| {
         input_images.iter()
             .zip(mask_images.iter())
-            .for_each(|(input, (_mask, material))| {
-                if args.extract_foreground {
+            .enumerate()
+            .for_each(|(index, (input, (_mask, material)))| {
+                if args.extract_foreground || (args.automatic_recording && index == 0) {
                     builder.spawn(MaterialNodeBundle {
                         style: Style {
                             width: Val::Percent(100.0),
@@ -308,31 +321,72 @@ fn press_esc_close(
     }
 }
 
+
+// TODO: add system to detect person mask in camera 0 for automatic recording
+fn automatic_recording(
+    mut commands: Commands,
+    stream_manager: Res<RtspStreamManager>,
+    mut live_session: ResMut<LiveSession>,
+) {
+    if live_session.0.is_some() {
+        return;
+    }
+
+    // TODO: check the segmentation mask labeled for automatic recording detection
+}
+
+
+#[derive(Resource, Default)]
+pub struct LiveSession(Option<Entity>);
+
 fn press_r_start_recording(
+    mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
-    stream_manager: Res<RtspStreamManager>
+    stream_manager: Res<RtspStreamManager>,
+    mut live_session: ResMut<LiveSession>,
 ) {
     if keys.just_pressed(KeyCode::KeyR) {
+        if live_session.0.is_some() {
+            return;
+        }
 
-        let output_directory = "capture";
-        let session_id = get_next_session_id(output_directory);
-        let output_directory = format!("{}/{}", output_directory, session_id);
-
-        std::fs::create_dir_all(&output_directory).unwrap();
+        let session = Session {
+            directory: "capture".to_string(),
+            ..default()
+        };
 
         stream_manager.start_recording(
-            &output_directory,
-            "bevy_light_field",
+            &session.directory,
         );
+
+        let entity = commands.spawn(
+            StreamSessionBundle {
+                session: session,
+                raw_streams: RawStreams {
+                    streams: vec![],
+                },
+                config: PipelineConfig::default(),
+            },
+        ).id();
+        live_session.0 = Some(entity);
     }
 }
 
 fn press_s_stop_recording(
+    mut commands: Commands,
     keys: Res<ButtonInput<KeyCode>>,
-    stream_manager: Res<RtspStreamManager>
+    stream_manager: Res<RtspStreamManager>,
+    mut live_session: ResMut<LiveSession>,
 ) {
-    if keys.just_pressed(KeyCode::KeyS) {
-        stream_manager.stop_recording();
+    if keys.just_pressed(KeyCode::KeyS) && live_session.0.is_some() {
+        let session_entity = live_session.0.take().unwrap();
+
+        let raw_streams = stream_manager.stop_recording();
+
+        commands.entity(session_entity)
+            .insert(RawStreams {
+                streams: raw_streams,
+            });
     }
 }
 
@@ -370,21 +424,7 @@ fn calculate_grid_dimensions(window_width: f32, window_height: f32, num_streams:
 }
 
 
-fn get_next_session_id(output_directory: &str) -> i32 {
-    match std::fs::read_dir(output_directory) {
-        Ok(entries) => entries.filter_map(|entry| {
-            let entry = entry.ok()?;
-                if entry.path().is_dir() {
-                    entry.file_name().to_string_lossy().parse::<i32>().ok()
-                } else {
-                    None
-                }
-            })
-            .max()
-            .map_or(0, |max_id| max_id + 1),
-        Err(_) => 0,
-    }
-}
+
 
 
 fn fps_display_setup(

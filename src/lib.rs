@@ -5,6 +5,8 @@ pub mod matting;
 
 pub mod materials;
 pub mod mp4;
+pub mod person_detect;
+pub mod pipeline;
 pub mod stream;
 
 

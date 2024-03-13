@@ -20,6 +20,7 @@ use retina::{
         SessionOptions,
         SetupOptions,
         TcpTransportOptions,
+        UdpTransportOptions,
         Transport,
     },
     codec::VideoFrame,
@@ -62,7 +63,7 @@ fn create_streams_from_descriptors(
     descriptors: Query<
         (
             Entity,
-            &RtspStreamDescriptor,
+            &RtspStreamHandle,
         ),
         Without<RtspStreamCreated>,
     >,
@@ -78,7 +79,7 @@ fn create_streams_from_descriptors(
 
 pub fn apply_decode(
     mut images: ResMut<Assets<Image>>,
-    descriptors: Query<&RtspStreamDescriptor>,
+    descriptors: Query<&RtspStreamHandle>,
 ) {
     for descriptor in descriptors.iter() {
         let frame = descriptor.take_frame();
@@ -118,23 +119,42 @@ pub enum RecordingCommand {
 }
 
 
-#[derive(Component, Clone)]
-pub struct RtspStreamDescriptor {
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+pub enum StreamTransport {
+    #[default]
+    Tcp,
+    Udp,
+}
+
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+pub struct StreamDescriptor {
     pub uri: String,
+
+    #[serde(default)]
+    pub transport: StreamTransport,
+}
+
+#[derive(Resource, Clone, Debug, Default, Serialize, Deserialize)]
+pub struct StreamUris(pub Vec<StreamDescriptor>);
+
+
+#[derive(Component, Clone)]
+pub struct RtspStreamHandle {
+    pub descriptor: StreamDescriptor,
     pub id: StreamId,
     pub image: bevy::asset::Handle<Image>,
     latest_frame: Arc<Mutex<Option<Bgra8Frame>>>,
     recording_sender: Arc<Mutex<Option<mpsc::Sender<RecordingCommand>>>>,
 }
 
-impl RtspStreamDescriptor {
+impl RtspStreamHandle {
     pub fn new(
-        uri: String,
+        descriptor: StreamDescriptor,
         id: StreamId,
         image: bevy::asset::Handle<Image>,
     ) -> Self {
         Self {
-            uri,
+            descriptor,
             id,
             image,
             latest_frame: Arc::new(Mutex::new(None)),
@@ -166,7 +186,7 @@ struct Bgra8Frame {
 
 #[derive(Resource)]
 pub struct RtspStreamManager {
-    stream_descriptors: Arc<Mutex<Vec<RtspStreamDescriptor>>>,
+    stream_handles: Arc<Mutex<Vec<RtspStreamHandle>>>,
     handle: Handle,
 }
 
@@ -184,7 +204,7 @@ impl FromWorld for RtspStreamManager {
         });
 
         Self {
-            stream_descriptors: Arc::new(Mutex::new(vec![])),
+            stream_handles: Arc::new(Mutex::new(vec![])),
             handle,
         }
     }
@@ -192,11 +212,11 @@ impl FromWorld for RtspStreamManager {
 
 impl RtspStreamManager {
     pub fn contains(&self, id: StreamId) -> bool {
-        self.stream_descriptors.lock().unwrap().iter().any(|s: &RtspStreamDescriptor| s.id == id)
+        self.stream_handles.lock().unwrap().iter().any(|s: &RtspStreamHandle| s.id == id)
     }
 
     pub fn add_stream(&self, stream: RtspStream) {
-        self.stream_descriptors.lock().unwrap().push(stream.descriptor.clone());
+        self.stream_handles.lock().unwrap().push(stream.handle.clone());
 
         self.handle.spawn(async move {
             let mut stream = stream;
@@ -207,10 +227,11 @@ impl RtspStreamManager {
         });
     }
 
-    pub fn start_recording(&self, output_directory: &str, prefix: &str) {
-        let stream_descriptors = self.stream_descriptors.lock().unwrap();
-        for descriptor in stream_descriptors.iter() {
-            let filepath = format!("{}/{}_{}.mp4", output_directory, prefix, descriptor.id.0);
+    pub fn start_recording(&self, output_directory: &str) {
+        let stream_handles = self.stream_handles.lock().unwrap();
+        for descriptor in stream_handles.iter() {
+            let filename = format!("{}.mp4", descriptor.id.0);
+            let filepath = format!("{}/{}", output_directory, filename);
 
             let send_channel = descriptor.recording_sender.lock().unwrap();
             let sender_clone = send_channel.as_ref().unwrap().clone();
@@ -222,35 +243,41 @@ impl RtspStreamManager {
         }
     }
 
-    pub fn stop_recording(&self) {
-        let stream_descriptors = self.stream_descriptors.lock().unwrap();
-        for descriptor in stream_descriptors.iter() {
+    pub fn stop_recording(&self) -> Vec<String> {
+        let mut filepaths = vec![];
+
+        let stream_handles = self.stream_handles.lock().unwrap();
+        for descriptor in stream_handles.iter() {
             let send_channel = descriptor.recording_sender.lock().unwrap();
             let sender_clone = send_channel.as_ref().unwrap().clone();
 
             self.handle.block_on(async move {
                 sender_clone.send(RecordingCommand::StopRecording).await.unwrap();
             });
+
+            filepaths.push(format!("{}.mp4", descriptor.id.0));
         }
+
+        filepaths
     }
 }
 
 
 
 pub struct RtspStream {
-    pub descriptor: RtspStreamDescriptor,
+    pub handle: RtspStreamHandle,
     decoder: Option<Decoder>,
     demuxed: Option<Demuxed>,
     writer: Option<Mp4Writer<File>>,
 }
 
 impl RtspStream {
-    pub fn new(descriptor: RtspStreamDescriptor) -> Self {
+    pub fn new(handle: RtspStreamHandle) -> Self {
         let api = openh264::OpenH264API::from_source();
         let decoder = Decoder::new(api).ok();
 
         Self {
-            descriptor,
+            handle,
             decoder,
             demuxed: None,
             writer: None,
@@ -258,13 +285,13 @@ impl RtspStream {
     }
 
     async fn run(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>{
-        let (session, stream_idx) = create_session(&self.descriptor.uri).await?;
+        let (session, stream_idx) = create_session(&self.handle.descriptor).await?;
         self.demuxed = session.demuxed()?.into();
 
         let (sender, mut receiver) = mpsc::channel(1);
 
         {
-            let mut send_channel = self.descriptor.recording_sender.lock().unwrap();
+            let mut send_channel = self.handle.recording_sender.lock().unwrap();
             *send_channel = sender.into();
         }
 
@@ -284,11 +311,11 @@ impl RtspStream {
                             file,
                         ).await.ok();
 
-                        println!("writing stream {}", self.descriptor.id.0);
+                        println!("writing stream {}", self.handle.id.0);
                     },
                     RecordingCommand::StopRecording => {
                         if let Some(writer) = self.writer.take() {
-                            println!("stopped recording stream {}", self.descriptor.id.0);
+                            println!("stopped recording stream {}", self.handle.id.0);
                             writer.finish().await.ok();
                         }
                     },
@@ -304,6 +331,8 @@ impl RtspStream {
                 }
             }
 
+            // TODO: enable/disable decoding based on whether the live frames are being used
+
             let mut data = frame.into_data();
             convert_h264(&mut data)?;
 
@@ -315,7 +344,7 @@ impl RtspStream {
                     let image_size = frame.dimension_rgb();
 
                     {
-                        let mut locked_sink = self.descriptor.latest_frame.lock().unwrap();
+                        let mut locked_sink = self.handle.latest_frame.lock().unwrap();
                         match *locked_sink {
                             Some(ref mut sink) => {
                                 assert_eq!(u32::from(sink.width), image_size.0 as u32, "frame width mismatch - stream size changes are not supported yet.");
@@ -359,11 +388,11 @@ impl RtspStream {
 }
 
 
-async fn create_session(url: &str) -> Result<
+async fn create_session(descriptor: &StreamDescriptor) -> Result<
     (Session<Playing>, usize),
     Box<dyn std::error::Error + Send + Sync>
 > {
-    let parsed_url = Url::parse(url)?;
+    let parsed_url = Url::parse(&descriptor.uri)?;
 
     let username = parsed_url.username();
     let password = parsed_url.password().unwrap_or("");
@@ -390,8 +419,10 @@ async fn create_session(url: &str) -> Result<
         options,
     ).await?;
 
-    let tcp_options = TcpTransportOptions::default();
-    let transport = Transport::Tcp(tcp_options);
+    let transport = match descriptor.transport {
+        StreamTransport::Tcp => Transport::Tcp(TcpTransportOptions::default()),
+        StreamTransport::Udp => Transport::Udp(UdpTransportOptions::default()),
+    };
 
     let video_stream_index = session.streams().iter().enumerate().find_map(|(i, s)| {
         if s.media() == "video" && s.encoding_name().to_uppercase() == "H264" {
@@ -434,8 +465,3 @@ fn convert_h264(data: &mut [u8]) -> Result<(), Error> {
 
     Ok(())
 }
-
-
-
-#[derive(Resource, Clone, Debug, Default, Reflect, Serialize, Deserialize)]
-pub struct StreamUris(pub Vec<String>);

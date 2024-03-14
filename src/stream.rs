@@ -235,10 +235,13 @@ impl RtspStreamManager {
     }
 
     pub fn start_recording(&self, session: &PipelineSession) {
+        let output_directory = format!("{}/raw", session.directory);
+        std::fs::create_dir_all(&output_directory).unwrap();
+
         let stream_handles = self.stream_handles.lock().unwrap();
         for descriptor in stream_handles.iter() {
             let filename = format!("{}.mp4", descriptor.id.0);
-            let filepath = format!("{}/{}", session.directory, filename);
+            let filepath = format!("{}/{}", output_directory, filename);
 
             let send_channel = descriptor.recording_sender.lock().unwrap();
 

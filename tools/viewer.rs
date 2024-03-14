@@ -87,7 +87,7 @@ pub struct LightFieldViewer {
     pub max_matting_height: u32,
 
     #[arg(long)]
-    pub session_name: Option<String>,
+    pub session_id: Option<usize>,
 }
 
 
@@ -142,6 +142,7 @@ fn main() {
                 #[cfg(feature = "person_matting")]
                 create_mask_streams,
                 setup_camera,
+                select_session_from_args,
             )
         )
         .add_systems(
@@ -370,6 +371,30 @@ fn press_esc_close(
     if keys.just_pressed(KeyCode::Escape) {
         exit.send(AppExit);
     }
+}
+
+
+fn select_session_from_args(
+    mut commands: Commands,
+    args: Res<LightFieldViewer>,
+) {
+    if args.session_id.is_none() {
+        return;
+    }
+
+    let session = Session::from_id(
+        args.session_id.unwrap(),
+        "capture".to_string(),
+    );
+    let raw_streams = RawStreams::load_from_session(&session);
+
+    commands.spawn(
+        StreamSessionBundle {
+            session,
+            raw_streams,
+            config: PipelineConfig::default(),
+        },
+    );
 }
 
 

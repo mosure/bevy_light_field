@@ -1,5 +1,4 @@
 use bevy::prelude::*;
-use image::DynamicImage;
 use rayon::prelude::*;
 
 use crate::ffmpeg::FfmpegArgs;
@@ -60,8 +59,14 @@ pub struct Session {
 impl Session {
     pub fn new(directory: String) -> Self {
         let id = get_next_session_id(&directory);
-        let directory = format!("{}/{}/raw", directory, id);
+        let directory = format!("{}/{}", directory, id);
         std::fs::create_dir_all(&directory).unwrap();
+
+        Self { id, directory }
+    }
+
+    pub fn from_id(id: usize, directory: String) -> Self {
+        let directory = format!("{}/{}", directory, id);
 
         Self { id, directory }
     }
@@ -79,8 +84,22 @@ pub struct RawStreams {
     pub streams: Vec<String>,
 }
 
+impl RawStreams {
+    pub fn load_from_session(session: &Session) -> Self {
+        let streams_directory = format!("{}/raw", session.directory);
 
-// TODO: add a pipeline config for the session describing which components to run
+        let streams = std::fs::read_dir(streams_directory)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_file())
+            .map(|entry| entry.path().to_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+
+        Self {
+            streams,
+        }
+    }
+}
 
 
 fn generate_raw_frames(
@@ -101,11 +120,9 @@ fn generate_raw_frames(
         raw_streams,
         session,
     ) in raw_streams.iter() {
-        let raw_frames = RawFrames::new(session);
-
         if config.raw_frames {
             let run_node = !RawFrames::exists(session);
-            let mut raw_frames = RawFrames::new(session);
+            let mut raw_frames = RawFrames::load_from_session(&session);
 
             if run_node {
                 let frame_directory = format!("{}/frames", session.directory);
@@ -113,13 +130,16 @@ fn generate_raw_frames(
                 raw_streams.streams.par_iter()
                     .enumerate()
                     .for_each(|(stream_idx, mp4_path)| {
+                        let output_directory = format!("{}/{}", frame_directory, stream_idx);
+                        std::fs::create_dir_all(&output_directory).unwrap();
+
                         let _ = FfmpegArgs {
                             mp4_path: mp4_path.clone(),
                             fps: 5,
                             width: 1920,
                             height: 1080,
                             interpolation: "lanczos".to_string(),
-                            output_directory: format!("{}/{}", frame_directory, stream_idx),
+                            output_directory,
                         }.run();
                     });
 
@@ -134,12 +154,12 @@ fn generate_raw_frames(
                             .map(|entry| entry.path().to_str().unwrap().to_string())
                     )
                     .collect::<Vec<_>>();
-
-                commands.entity(entity).insert(raw_frames);
+            } else {
+                println!("RawFrames already exists for session {}, loading...", session.id);
             }
-        }
 
-        commands.entity(entity).insert(raw_frames);
+            commands.entity(entity).insert(raw_frames);
+        }
     }
 }
 
@@ -149,9 +169,7 @@ pub struct RawFrames {
     pub frames: Vec<String>,
 }
 impl RawFrames {
-    // TODO: move new and exists to a trait
-
-    pub fn new(
+    pub fn load_from_session(
         session: &Session,
     ) -> Self {
         let output_directory = format!("{}/frames", session.directory);

@@ -430,9 +430,10 @@ fn automatic_recording(
         return;
     }
 
-    for ev in ev_person.read() {
-        println!("person detected: {:?}", ev);
+    let person_detected = !ev_person.is_empty();
+    ev_person.clear();
 
+    if person_detected {
         // TODO: deduplicate start recording logic
         let session = Session::new("capture".to_string());
 
@@ -443,14 +444,12 @@ fn automatic_recording(
         // TODO: build pipeline config from args
         let entity = commands.spawn(
             StreamSessionBundle {
-                session: session,
+                session,
                 raw_streams: RawStreams::default(),
                 config: PipelineConfig::default(),
             },
         ).id();
         live_session.0 = Some(entity);
-
-        break;
     }
 }
 
@@ -477,7 +476,7 @@ fn press_r_start_recording(
 
         let entity = commands.spawn(
             StreamSessionBundle {
-                session: session,
+                session,
                 raw_streams: RawStreams::default(),
                 config: PipelineConfig::default(),
             },

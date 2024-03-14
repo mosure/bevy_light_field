@@ -1,8 +1,7 @@
 use std::cmp::{max, min};
 
 use bevy::prelude::*;
-use image::{DynamicImage, GenericImageView, imageops::FilterType, ImageBuffer, Luma, RgbImage};
-use rayon::prelude::*;
+use image::{ImageBuffer, Luma};
 
 use crate::{
     matting::MattedStream,
@@ -50,35 +49,32 @@ fn detect_person(
     images: Res<Assets<Image>>,
 ) {
     for ev in ev_asset.read() {
-        match ev {
-            AssetEvent::Modified { id } => {
-                for (matted_stream, _) in person_detect_streams.iter() {
-                    if &matted_stream.output.id() == id {
-                        let image = images.get(&matted_stream.output).unwrap();
+        if let AssetEvent::Modified { id } = ev {
+            for (matted_stream, _) in person_detect_streams.iter() {
+                if &matted_stream.output.id() == id {
+                    let image = images.get(&matted_stream.output).unwrap();
 
-                        let buffer = ImageBuffer::<Luma<u8>, Vec<u8>>::from_raw(
-                            image.width(),
-                            image.height(),
-                            image.data.clone(),
-                        ).unwrap();
+                    let buffer = ImageBuffer::<Luma<u8>, Vec<u8>>::from_raw(
+                        image.width(),
+                        image.height(),
+                        image.data.clone(),
+                    ).unwrap();
 
-                        let bounding_box = masked_bounding_box(&buffer);
-                        let sum = sum_masked_pixels(&buffer);
+                    let bounding_box = masked_bounding_box(&buffer);
+                    let sum = sum_masked_pixels(&buffer);
 
-                        let masked_ratio = sum / (buffer.width() * buffer.height()) as f32;
-                        let person_detected = masked_ratio > 0.14;
+                    let masked_ratio = sum / (buffer.width() * buffer.height()) as f32;
+                    let person_detected = masked_ratio > 0.14;
 
-                        if person_detected {
-                            ev_person_detected.send(PersonDetectedEvent {
-                                stream_id: matted_stream.stream_id,
-                                bounding_box: bounding_box.unwrap(),
-                                mask_sum: sum,
-                            });
-                        }
+                    if person_detected {
+                        ev_person_detected.send(PersonDetectedEvent {
+                            stream_id: matted_stream.stream_id,
+                            bounding_box: bounding_box.unwrap(),
+                            mask_sum: sum,
+                        });
                     }
                 }
             }
-            _ => {}
         }
     }
 }

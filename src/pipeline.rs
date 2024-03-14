@@ -122,7 +122,7 @@ fn generate_raw_frames(
     ) in raw_streams.iter() {
         if config.raw_frames {
             let run_node = !RawFrames::exists(session);
-            let mut raw_frames = RawFrames::load_from_session(&session);
+            let mut raw_frames = RawFrames::load_from_session(session);
 
             if run_node {
                 let frame_directory = format!("{}/frames", session.directory);
@@ -173,7 +173,7 @@ impl RawFrames {
         session: &Session,
     ) -> Self {
         let output_directory = format!("{}/frames", session.directory);
-        std::fs::create_dir_all(&output_directory).unwrap();
+        std::fs::create_dir_all(output_directory).unwrap();
 
         // TODO: load all files that are already in the directory
 
@@ -186,10 +186,10 @@ impl RawFrames {
         session: &Session,
     ) -> bool {
         let output_directory = format!("{}/frames", session.directory);
-        std::fs::metadata(&output_directory).is_ok()
+        std::fs::metadata(output_directory).is_ok()
     }
 
-    pub fn image(&self, camera: usize, frame: usize) -> Option<Image> {
+    pub fn image(&self, _camera: usize, _frame: usize) -> Option<Image> {
         todo!()
     }
 }
@@ -204,14 +204,14 @@ impl MaskFrames {
         session: &Session,
     ) -> Self {
         let output_directory = format!("{}/masks", session.directory);
-        std::fs::create_dir_all(&output_directory).unwrap();
+        std::fs::create_dir_all(output_directory).unwrap();
 
         Self {
             frames: vec![],
         }
     }
 
-    pub fn image(&self, camera: usize, frame: usize) -> Option<Image> {
+    pub fn image(&self, _camera: usize, _frame: usize) -> Option<Image> {
         todo!()
     }
 }

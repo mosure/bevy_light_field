@@ -4,7 +4,16 @@ use std::sync::{Arc, Mutex};
 use anyhow::{bail, Error};
 use bevy::{
     prelude::*,
-    render::render_resource::Extent3d,
+    render::{
+        render_asset::RenderAssetUsages,
+        render_resource::{
+            Extent3d,
+            TextureDescriptor,
+            TextureDimension,
+            TextureFormat,
+            TextureUsages,
+        },
+    },
 };
 use futures::TryStreamExt;
 use openh264::{
@@ -51,9 +60,28 @@ impl Plugin for RtspStreamPlugin {
         app
             .insert_resource(stream_uris)
             .init_resource::<RtspStreamManager>()
+            .add_systems(PreStartup, create_streams)
             .add_systems(Update, create_streams_from_descriptors)
             .add_systems(Update, apply_decode);
     }
+}
+
+fn create_streams(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    stream_uris: Res<StreamUris>,
+) {
+    stream_uris.0.iter()
+        .enumerate()
+        .for_each(|(index, descriptor)| {
+            let rtsp_stream = RtspStreamHandle::new(
+                descriptor.clone(),
+                StreamId(index),
+                &mut images,
+            );
+
+            commands.spawn(rtsp_stream);
+        });
 }
 
 
@@ -154,8 +182,36 @@ impl RtspStreamHandle {
     pub fn new(
         descriptor: StreamDescriptor,
         id: StreamId,
-        image: bevy::asset::Handle<Image>,
+        images: &mut Assets<Image>,
     ) -> Self {
+        let size = Extent3d {
+            width: 32,
+            height: 32,
+            ..default()
+        };
+
+        // TODO: use a default 'stream loading' texture
+
+        let mut image = Image {
+            asset_usage: RenderAssetUsages::all(),
+            texture_descriptor: TextureDescriptor {
+                label: None,
+                size,
+                dimension: TextureDimension::D2,
+                format: TextureFormat::Rgba8UnormSrgb,
+                mip_level_count: 1,
+                sample_count: 1,
+                usage: TextureUsages::COPY_DST
+                    | TextureUsages::TEXTURE_BINDING
+                    | TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[TextureFormat::Rgba8UnormSrgb],
+            },
+            ..default()
+        };
+        image.resize(size);
+
+        let image = images.add(image);
+
         Self {
             descriptor,
             id,

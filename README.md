@@ -42,24 +42,11 @@ the viewer opens a window and displays the light field camera array, with post-p
 ## library usage
 
 ```rust
-use bevy::{
-    prelude::*,
-    render::render_resource::{
-        Extent3d,
-        TextureDescriptor,
-        TextureDimension,
-        TextureFormat,
-        TextureUsages,
-    },
-};
+use bevy::prelude::*;
 
 use bevy_light_field::{
     LightFieldPlugin,
-    stream::{
-        RtspStreamHandle,
-        StreamId,
-        StreamUris,
-    },
+    stream::RtspStreamHandle,
 };
 
 fn main() {
@@ -70,47 +57,34 @@ fn main() {
                 stream_config: "assets/streams.json",
             },
         ))
-        .add_systems(Startup, create_streams)
+        .add_systems(Startup, setup_ui_gridview)
         .run();
 }
 
-
-fn create_streams(
+fn setup_ui_gridview(
     mut commands: Commands,
-    mut images: ResMut<Assets<Image>>,
-    stream_uris: Res<StreamUris>,
+    input_streams: Query<(
+        Entity,
+        &RtspStreamHandle,
+    )>,
 ) {
-    stream_uris.0.iter()
-        .enumerate()
-        .for_each(|(index, descriptor)| {
-            let mut image = Image {
-                asset_usage: RenderAssetUsages::all(),
-                texture_descriptor: TextureDescriptor {
-                    label: None,
-                    size,
-                    dimension: TextureDimension::D2,
-                    format: TextureFormat::Rgba8UnormSrgb,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    usage: TextureUsages::COPY_DST
-                        | TextureUsages::TEXTURE_BINDING
-                        | TextureUsages::RENDER_ATTACHMENT,
-                    view_formats: &[TextureFormat::Rgba8UnormSrgb],
-                },
-                ..default()
-            };
-            image.resize(size);
+    let stream = input_streams.single().unwrap();
 
-            let image = images.add(image);
+    commands.spawn(ImageBundle {
+        style: Style {
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        image: UiImage::new(stream.image.clone()),
+        ..default()
+    });
 
-            let rtsp_stream = RtspStreamHandle::new(
-                descriptor.clone(),
-                StreamId(index),
-                image,
-            );
-
-            commands.spawn(rtsp_stream);
-        });
+    commands.spawn((
+        Camera2dBundle {
+            ..default()
+        },
+    ));
 }
 ```
 

@@ -42,8 +42,6 @@ use bevy_light_field::{
     stream::{
         RtspStreamHandle,
         RtspStreamManager,
-        StreamId,
-        StreamUris,
     },
 };
 
@@ -131,12 +129,6 @@ fn main() {
         ))
         .init_resource::<LiveSession>()
         .add_systems(
-            PreStartup,
-            (
-                create_streams,
-            )
-        )
-        .add_systems(
             Startup,
             (
                 #[cfg(feature = "person_matting")]
@@ -163,7 +155,7 @@ fn main() {
 
     if args.show_fps {
         app.add_plugins(FrameTimeDiagnosticsPlugin);
-        app.add_systems(Startup, fps_display_setup.after(create_streams));
+        app.add_systems(PostStartup, fps_display_setup.after(setup_ui_gridview));
         app.add_systems(Update, fps_update_system);
     }
 
@@ -171,51 +163,7 @@ fn main() {
 }
 
 
-fn create_streams(
-    mut commands: Commands,
-    mut images: ResMut<Assets<Image>>,
-    stream_uris: Res<StreamUris>,
-) {
-    let size = Extent3d {
-        width: 32,
-        height: 32,
-        ..default()
-    };
-
-    stream_uris.0.iter()
-        .enumerate()
-        .for_each(|(index, descriptor)| {
-            let mut image = Image {
-                asset_usage: RenderAssetUsages::all(),
-                texture_descriptor: TextureDescriptor {
-                    label: None,
-                    size,
-                    dimension: TextureDimension::D2,
-                    format: TextureFormat::Rgba8UnormSrgb,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    usage: TextureUsages::COPY_DST
-                        | TextureUsages::TEXTURE_BINDING
-                        | TextureUsages::RENDER_ATTACHMENT,
-                    view_formats: &[TextureFormat::Rgba8UnormSrgb],
-                },
-                ..default()
-            };
-            image.resize(size);
-
-            let image = images.add(image);
-
-            let rtsp_stream = RtspStreamHandle::new(
-                descriptor.clone(),
-                StreamId(index),
-                image,
-            );
-
-            commands.spawn(rtsp_stream);
-        });
-}
-
-
+// TODO: move to MattingPlugin
 #[cfg(feature = "person_matting")]
 fn create_mask_streams(
     mut commands: Commands,

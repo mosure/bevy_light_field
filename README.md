@@ -80,7 +80,7 @@ fn create_streams(
     mut images: ResMut<Assets<Image>>,
     stream_uris: Res<StreamUris>,
 ) {
-    RTSP_URIS.iter()
+    stream_uris.0.iter()
         .enumerate()
         .for_each(|(index, descriptor)| {
             let mut image = Image {

@@ -505,6 +505,10 @@ fn press_s_stop_recording(
 }
 
 
+// TODO: add pipeline viewer /w left/right arrow keys and UI controls to switch between frames
+
+
+
 fn calculate_grid_dimensions(window_width: f32, window_height: f32, num_streams: usize) -> (usize, usize, f32, f32) {
     let window_aspect_ratio = window_width / window_height;
     let stream_aspect_ratio: f32 = 16.0 / 9.0;

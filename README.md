@@ -53,23 +53,22 @@ use bevy::{
     },
 };
 
-use bevy_light_field::stream::{
-    RtspStreamHandle,
-    RtspStreamPlugin,
-    StreamId,
+use bevy_light_field::{
+    LightFieldPlugin,
+    stream::{
+        RtspStreamHandle,
+        StreamId,
+        StreamUris,
+    },
 };
-
-
-const RTSP_URIS: [&str; 1] = [
-    "rtsp://localhost:554/lizard",
-];
-
 
 fn main() {
     App::new()
         .add_plugins((
             DefaultPlugins,
-            RtspStreamPlugin,
+            LightFieldPlugin {
+                stream_config: "assets/streams.json",
+            },
         ))
         .add_systems(Startup, create_streams)
         .run();
@@ -79,21 +78,15 @@ fn main() {
 fn create_streams(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
+    stream_uris: Res<StreamUris>,
 ) {
     RTSP_URIS.iter()
         .enumerate()
-        .for_each(|(index, &url)| {
-            let entity = commands.spawn_empty().id();
-
-            let size = Extent3d {
-                width: 640,
-                height: 360,
-                ..default()
-            };
-
+        .for_each(|(index, descriptor)| {
             let mut image = Image {
+                asset_usage: RenderAssetUsages::all(),
                 texture_descriptor: TextureDescriptor {
-                    label: Some(url),
+                    label: None,
                     size,
                     dimension: TextureDimension::D2,
                     format: TextureFormat::Rgba8UnormSrgb,
@@ -109,22 +102,14 @@ fn create_streams(
             image.resize(size);
 
             let image = images.add(image);
-            commands.spawn(SpriteBundle {
-                sprite: Sprite {
-                    custom_size: Some(Vec2::new(640.0, 360.0)),
-                    ..default()
-                },
-                texture: image.clone(),
-                ..default()
-            });
 
             let rtsp_stream = RtspStreamHandle::new(
-                url.to_string(),
+                descriptor.clone(),
                 StreamId(index),
                 image,
             );
 
-            commands.entity(entity).insert(rtsp_stream);
+            commands.spawn(rtsp_stream);
         });
 }
 ```

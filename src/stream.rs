@@ -132,6 +132,9 @@ pub struct StreamDescriptor {
 
     #[serde(default)]
     pub transport: StreamTransport,
+
+    pub visible: Option<bool>,
+    pub person_detection: Option<bool>,
 }
 
 #[derive(Resource, Clone, Debug, Default, Serialize, Deserialize)]

@@ -1,8 +1,8 @@
 [
-    { "uri": "rtsp://192.168.1.21/stream/main", "transport": "Udp" },
-    { "uri": "rtsp://192.168.1.22/stream/main", "transport": "Udp" },
+    { "uri": "rtsp://192.168.1.21/stream/main", "transport": "Udp", "visible": true },
+    { "uri": "rtsp://192.168.1.22/stream/main", "transport": "Udp", "visible": true, "person_detection": true },
 
-    { "uri": "rtsp://192.168.1.23/user=admin&password=admin123&channel=1&stream=0.sdp?" },
+    { "uri": "rtsp://192.168.1.23/user=admin&password=admin123&channel=1&stream=0.sdp?", "visible": true },
     { "uri": "rtsp://192.168.1.24/user=admin&password=admin123&channel=1&stream=0.sdp?" },
     { "uri": "rtsp://192.168.1.25/user=admin&password=admin123&channel=1&stream=0.sdp?" },
     { "uri": "rtsp://192.168.1.26/user=admin&password=admin123&channel=1&stream=0.sdp?" },

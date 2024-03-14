@@ -3,6 +3,7 @@ use bevy::prelude::*;
 #[cfg(feature = "person_matting")]
 pub mod matting;
 
+pub mod ffmpeg;
 pub mod materials;
 pub mod mp4;
 pub mod person_detect;

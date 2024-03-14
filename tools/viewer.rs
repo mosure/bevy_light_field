@@ -86,8 +86,8 @@ pub struct LightFieldViewer {
     #[arg(long, default_value = "1024")]
     pub max_matting_height: u32,
 
-    #[arg(long, default_value = "false")]
-    pub extract_foreground: bool,
+    #[arg(long)]
+    pub session_name: Option<String>,
 }
 
 
@@ -130,8 +130,26 @@ fn main() {
             )),
         ))
         .init_resource::<LiveSession>()
-        .add_systems(Startup, create_streams)
-        .add_systems(Startup, setup_camera)
+        .add_systems(
+            PreStartup,
+            (
+                create_streams,
+            )
+        )
+        .add_systems(
+            Startup,
+            (
+                #[cfg(feature = "person_matting")]
+                create_mask_streams,
+                setup_camera,
+            )
+        )
+        .add_systems(
+            PostStartup,
+            (
+                setup_ui_gridview,
+            )
+        )
         .add_systems(
             Update,
             (
@@ -155,38 +173,17 @@ fn main() {
 fn create_streams(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
-    primary_window: Query<&Window, With<PrimaryWindow>>,
-    args: Res<LightFieldViewer>,
-    mut foreground_materials: ResMut<Assets<ForegroundMaterial>>,
     stream_uris: Res<StreamUris>,
 ) {
-    let window = primary_window.single();
-    let elements = stream_uris.0.len();
-
-    let (
-        columns,
-        rows,
-        _sprite_width,
-        _sprite_height,
-    ) = calculate_grid_dimensions(
-        window.width(),
-        window.height(),
-        elements,
-    );
-
     let size = Extent3d {
         width: 32,
         height: 32,
         ..default()
     };
 
-    // TODO: support enabling/disabling decoding/matting per stream (e.g. during 'record mode')
-
-    let input_images: Vec<Handle<Image>> = stream_uris.0.iter()
+    stream_uris.0.iter()
         .enumerate()
-        .map(|(index, descriptor)| {
-            let entity = commands.spawn_empty().id();
-
+        .for_each(|(index, descriptor)| {
             let mut image = Image {
                 asset_usage: RenderAssetUsages::all(),
                 texture_descriptor: TextureDescriptor {
@@ -206,7 +203,6 @@ fn create_streams(
             image.resize(size);
 
             let image = images.add(image);
-            let image_clone = image.clone();
 
             let rtsp_stream = RtspStreamHandle::new(
                 descriptor.clone(),
@@ -214,15 +210,33 @@ fn create_streams(
                 image,
             );
 
-            commands.entity(entity).insert(rtsp_stream);
+            commands.spawn(rtsp_stream);
+        });
+}
 
-            image_clone
-        })
-        .collect();
 
-    let mask_images = input_images.iter()
-        .enumerate()
-        .map(|(index, image)| {
+#[cfg(feature = "person_matting")]
+fn create_mask_streams(
+    mut commands: Commands,
+    mut images: ResMut<Assets<Image>>,
+    mut foreground_materials: ResMut<Assets<ForegroundMaterial>>,
+    args: Res<LightFieldViewer>,
+    input_streams: Query<
+        (
+            Entity,
+            &RtspStreamHandle,
+        ),
+        Without<MattedStream>
+    >,
+) {
+    let size = Extent3d {
+        width: 32,
+        height: 32,
+        ..default()
+    };
+
+    input_streams.iter()
+        .for_each(|(entity, stream)| {
             let mut mask_image = Image {
                 asset_usage: RenderAssetUsages::all(),
                 texture_descriptor: TextureDescriptor {
@@ -242,32 +256,58 @@ fn create_streams(
             mask_image.resize(size);
             let mask_image = images.add(mask_image);
 
-            let mut material = None;
-
-            #[cfg(feature = "person_matting")]
-            if args.extract_foreground || (args.automatic_recording && index == 0) {
+            if args.automatic_recording && stream.descriptor.person_detection.unwrap_or_default() {
                 let foreground_mat = foreground_materials.add(ForegroundMaterial {
-                    input: image.clone(),
+                    input: stream.image.clone(),
                     mask: mask_image.clone(),
                 });
 
-                let mut entity = commands.spawn(MattedStream {
-                    stream_id: StreamId(index),
-                    input: image.clone(),
-                    output: mask_image.clone(),
-                    material: foreground_mat.clone(),
-                });
-
-                if args.automatic_recording && index == 0 {
-                    entity.insert(DetectPersons);
-                }
-
-                material = foreground_mat.into();
+                commands.entity(entity)
+                    .insert(MattedStream {
+                        stream_id: stream.id,
+                        input: stream.image.clone(),
+                        output: mask_image.clone(),
+                        material: foreground_mat,
+                    })
+                    .insert(DetectPersons);
             }
+        });
+}
 
-            (mask_image, material)
-        })
+
+fn setup_ui_gridview(
+    mut commands: Commands,
+    primary_window: Query<&Window, With<PrimaryWindow>>,
+    input_streams: Query<(
+        Entity,
+        &RtspStreamHandle,
+    )>,
+    person_detection_stream: Query<
+        (
+            Entity,
+            &MattedStream,
+        ),
+        With<DetectPersons>,
+    >,
+) {
+    let window = primary_window.single();
+
+    let visible_input_streams = input_streams.iter()
+        .filter(|(_, stream)| stream.descriptor.visible.unwrap_or_default())
         .collect::<Vec<_>>();
+
+    let visible_streams = visible_input_streams.len() + person_detection_stream.iter().count();
+
+    let (
+        columns,
+        rows,
+        _sprite_width,
+        _sprite_height,
+    ) = calculate_grid_dimensions(
+        window.width(),
+        window.height(),
+        visible_streams,
+    );
 
     commands.spawn(NodeBundle {
         style: Style {
@@ -282,31 +322,32 @@ fn create_streams(
         ..default()
     })
     .with_children(|builder| {
-        input_images.iter()
-            .zip(mask_images.iter())
-            .enumerate()
-            .for_each(|(index, (input, (_mask, material)))| {
-                if args.extract_foreground || (args.automatic_recording && index == 0) {
-                    builder.spawn(MaterialNodeBundle {
-                        style: Style {
-                            width: Val::Percent(100.0),
-                            height: Val::Percent(100.0),
-                            ..default()
-                        },
-                        material: material.clone().unwrap(),
+        visible_input_streams
+            .iter()
+            .for_each(|(_, input_stream)| {
+                builder.spawn(ImageBundle {
+                    style: Style {
+                        width: Val::Percent(100.0),
+                        height: Val::Percent(100.0),
                         ..default()
-                    });
-                } else {
-                    builder.spawn(ImageBundle {
-                        style: Style {
-                            width: Val::Percent(100.0),
-                            height: Val::Percent(100.0),
-                            ..default()
-                        },
-                        image: UiImage::new(input.clone()),
+                    },
+                    image: UiImage::new(input_stream.image.clone()),
+                    ..default()
+                });
+            });
+
+        person_detection_stream
+            .iter()
+            .for_each(|(_, matted_stream)| {
+                builder.spawn(MaterialNodeBundle {
+                    style: Style {
+                        width: Val::Percent(100.0),
+                        height: Val::Percent(100.0),
                         ..default()
-                    });
-                }
+                    },
+                    material: matted_stream.material.clone(),
+                    ..default()
+                });
             });
     });
 }

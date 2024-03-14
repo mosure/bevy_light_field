@@ -2,11 +2,13 @@ use bevy::prelude::*;
 use image::DynamicImage;
 use rayon::prelude::*;
 
+use crate::ffmpeg::FfmpegArgs;
+
 
 pub struct PipelinePlugin;
 impl Plugin for PipelinePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, generate_annotations);
+        app.add_systems(Update, generate_raw_frames);
     }
 }
 
@@ -76,18 +78,12 @@ pub trait PipelineNode {
 pub struct RawStreams {
     pub streams: Vec<String>,
 }
-impl RawStreams {
-    pub fn decoders(&self) -> () {
-        // TODO: create decoders for each h264 file stream
-        todo!()
-    }
-}
 
 
 // TODO: add a pipeline config for the session describing which components to run
 
 
-fn generate_annotations(
+fn generate_raw_frames(
     mut commands: Commands,
     raw_streams: Query<
         (
@@ -112,35 +108,34 @@ fn generate_annotations(
             let mut raw_frames = RawFrames::new(session);
 
             if run_node {
-                // TODO: add (identifier == "{}_{}", stream, frame) output to this first stage (forward to mask stage /w image in RAM)
-                let frames = raw_streams.streams.par_iter()
-                    .map(|stream| {
-                        let decoder = todo!();
+                let frame_directory = format!("{}/frames", session.directory);
 
-                        (stream, decoder)
-                    })
-                    .map(|(stream, decoder)| {
-                        let frames: Vec<DynamicImage> = vec![];
+                raw_streams.streams.par_iter()
+                    .enumerate()
+                    .for_each(|(stream_idx, mp4_path)| {
+                        let _ = FfmpegArgs {
+                            mp4_path: mp4_path.clone(),
+                            fps: 5,
+                            width: 1920,
+                            height: 1080,
+                            interpolation: "lanczos".to_string(),
+                            output_directory: format!("{}/{}", frame_directory, stream_idx),
+                        }.run();
+                    });
 
-                        // TODO: read all frames
-
-                        (stream, frames)
-                    })
+                raw_frames.frames = std::fs::read_dir(frame_directory)
+                    .unwrap()
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| entry.path().is_dir())
+                    .flat_map(|stream_dir|
+                        std::fs::read_dir(stream_dir.path()).unwrap()
+                            .filter_map(|entry| entry.ok())
+                            .filter(|entry| entry.path().is_file() && entry.path().extension().and_then(|s| s.to_str()) == Some("png"))
+                            .map(|entry| entry.path().to_str().unwrap().to_string())
+                    )
                     .collect::<Vec<_>>();
 
-                frames.par_iter()
-                    .for_each(|(stream, frames)| {
-                        frames.iter().enumerate()
-                            .for_each(|(i, frame)| {
-                                let path = format!(
-                                    "{}/frames/{}_{}.png",
-                                    session.directory,
-                                    stream,
-                                    i,
-                                );
-                                frame.save(path).unwrap();
-                            });
-                    });
+                commands.entity(entity).insert(raw_frames);
             }
         }
 

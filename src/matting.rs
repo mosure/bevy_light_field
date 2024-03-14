@@ -149,8 +149,8 @@ fn matting_inference(
                 command_queue.push(move |world: &mut World| {
                     world.resource_scope(|world, mut images: Mut<Assets<Image>>| {
                         world.resource_scope(|_world, mut foreground_materials: Mut<Assets<ForegroundMaterial>>| {
-                            outputs.into_iter().zip(mask_images).for_each(|((output, material), mask_image)| {
-                                images.insert(output, mask_image);
+                            outputs.into_iter().zip(mask_images).for_each(|((mask, material), mask_image)| {
+                                images.insert(mask, mask_image);
                                 foreground_materials.get_mut(&material).unwrap();
                             });
                         });

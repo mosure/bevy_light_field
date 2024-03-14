@@ -15,6 +15,7 @@ use bevy::{
             TextureUsages,
         },
     },
+    time::Stopwatch,
     window::PrimaryWindow,
 };
 use bevy_args::{
@@ -28,6 +29,10 @@ use bevy_args::{
 use bevy_light_field::{
     LightFieldPlugin,
     materials::foreground::ForegroundMaterial,
+    person_detect::{
+        DetectPersons,
+        PersonDetectedEvent,
+    },
     pipeline::{
         PipelineConfig,
         StreamSessionBundle,
@@ -76,9 +81,9 @@ pub struct LightFieldViewer {
     #[arg(long, default_value = "1080.0")]
     pub height: f32,
 
-    #[arg(long, default_value = "512")]
+    #[arg(long, default_value = "1024")]
     pub max_matting_width: u32,
-    #[arg(long, default_value = "512")]
+    #[arg(long, default_value = "1024")]
     pub max_matting_height: u32,
 
     #[arg(long, default_value = "false")]
@@ -131,6 +136,7 @@ fn main() {
             Update,
             (
                 press_esc_close,
+                automatic_recording,
                 press_r_start_recording,
                 press_s_stop_recording
             )
@@ -217,24 +223,24 @@ fn create_streams(
     let mask_images = input_images.iter()
         .enumerate()
         .map(|(index, image)| {
-            let mut mask_images = Image {
+            let mut mask_image = Image {
                 asset_usage: RenderAssetUsages::all(),
                 texture_descriptor: TextureDescriptor {
                     label: None,
                     size,
                     dimension: TextureDimension::D2,
-                    format: TextureFormat::Rgba8UnormSrgb,  // TODO: use R8 format
+                    format: TextureFormat::R8Unorm,
                     mip_level_count: 1,
                     sample_count: 1,
                     usage: TextureUsages::COPY_DST
                         | TextureUsages::TEXTURE_BINDING
                         | TextureUsages::RENDER_ATTACHMENT,
-                    view_formats: &[TextureFormat::Rgba8UnormSrgb],
+                    view_formats: &[TextureFormat::R8Unorm],
                 },
                 ..default()
             };
-            mask_images.resize(size);
-            let mask_image = images.add(mask_images);
+            mask_image.resize(size);
+            let mask_image = images.add(mask_image);
 
             let mut material = None;
 
@@ -245,12 +251,16 @@ fn create_streams(
                     mask: mask_image.clone(),
                 });
 
-                commands.spawn(MattedStream {
+                let mut entity = commands.spawn(MattedStream {
                     stream_id: StreamId(index),
                     input: image.clone(),
                     output: mask_image.clone(),
                     material: foreground_mat.clone(),
                 });
+
+                if args.automatic_recording && index == 0 {
+                    entity.insert(DetectPersons);
+                }
 
                 material = foreground_mat.into();
             }
@@ -322,17 +332,60 @@ fn press_esc_close(
 }
 
 
-// TODO: add system to detect person mask in camera 0 for automatic recording
 fn automatic_recording(
     mut commands: Commands,
+    time: Res<Time>,
+    mut ev_person: EventReader<PersonDetectedEvent>,
     stream_manager: Res<RtspStreamManager>,
     mut live_session: ResMut<LiveSession>,
+    mut person_timeout: Local<Stopwatch>,
 ) {
     if live_session.0.is_some() {
+        if person_timeout.elapsed_secs() > 3.0 {
+            person_timeout.reset();
+
+            println!("no person detected for 3 seconds, stopping recording");
+
+            let session_entity = live_session.0.take().unwrap();
+            let raw_streams = stream_manager.stop_recording();
+
+            commands.entity(session_entity)
+                .insert(RawStreams {
+                    streams: raw_streams,
+                });
+        }
+
+        person_timeout.tick(time.delta());
+
+        for _ev in ev_person.read() {
+            person_timeout.reset();
+        }
+
         return;
     }
 
-    // TODO: check the segmentation mask labeled for automatic recording detection
+    for ev in ev_person.read() {
+        println!("person detected: {:?}", ev);
+
+        // TODO: deduplicate start recording logic
+        let session = Session::new("capture".to_string());
+
+        stream_manager.start_recording(
+            &session,
+        );
+
+        // TODO: build pipeline config from args
+        let entity = commands.spawn(
+            StreamSessionBundle {
+                session: session,
+                raw_streams: RawStreams::default(),
+                config: PipelineConfig::default(),
+            },
+        ).id();
+        live_session.0 = Some(entity);
+
+        break;
+    }
 }
 
 
@@ -350,21 +403,16 @@ fn press_r_start_recording(
             return;
         }
 
-        let session = Session {
-            directory: "capture".to_string(),
-            ..default()
-        };
+        let session = Session::new("capture".to_string());
 
         stream_manager.start_recording(
-            &session.directory,
+            &session,
         );
 
         let entity = commands.spawn(
             StreamSessionBundle {
                 session: session,
-                raw_streams: RawStreams {
-                    streams: vec![],
-                },
+                raw_streams: RawStreams::default(),
                 config: PipelineConfig::default(),
             },
         ).id();

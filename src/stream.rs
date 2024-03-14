@@ -28,15 +28,15 @@ use retina::{
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::File,
-    runtime::{
-        Handle,
-        Runtime,
-    },
+    runtime::Handle,
     sync::mpsc,
 };
 use url::Url;
 
-use crate::mp4::Mp4Writer;
+use crate::{
+    mp4::Mp4Writer,
+    pipeline::Session as PipelineSession,
+};
 
 
 pub struct RtspStreamPlugin {
@@ -192,7 +192,11 @@ pub struct RtspStreamManager {
 
 impl FromWorld for RtspStreamManager {
     fn from_world(_world: &mut World) -> Self {
-        let runtime = Runtime::new().unwrap();
+
+        // TODO: upgrade to [bevy-tokio-tasks](https://github.com/EkardNT/bevy-tokio-tasks) to share tokio runtime between rtsp and inference - waiting on: https://github.com/pykeio/ort/pull/174
+        let mut runtime = tokio::runtime::Builder::new_multi_thread();
+        runtime.enable_all();
+        let runtime = runtime.build().unwrap();
         let handle = runtime.handle().clone();
 
         std::thread::spawn(move || {
@@ -227,18 +231,24 @@ impl RtspStreamManager {
         });
     }
 
-    pub fn start_recording(&self, output_directory: &str) {
+    pub fn start_recording(&self, session: &PipelineSession) {
         let stream_handles = self.stream_handles.lock().unwrap();
         for descriptor in stream_handles.iter() {
             let filename = format!("{}.mp4", descriptor.id.0);
-            let filepath = format!("{}/{}", output_directory, filename);
+            let filepath = format!("{}/{}", session.directory, filename);
 
             let send_channel = descriptor.recording_sender.lock().unwrap();
+
+            if send_channel.is_none() {
+                println!("no recording sender for stream {}", descriptor.id.0);
+                continue;
+            }
+
             let sender_clone = send_channel.as_ref().unwrap().clone();
 
             self.handle.block_on(async move {
                 let file = File::create(&filepath).await.unwrap();
-                sender_clone.send(RecordingCommand::StartRecording(file)).await.unwrap();
+                let _ = sender_clone.send(RecordingCommand::StartRecording(file)).await;
             });
         }
     }
@@ -249,10 +259,16 @@ impl RtspStreamManager {
         let stream_handles = self.stream_handles.lock().unwrap();
         for descriptor in stream_handles.iter() {
             let send_channel = descriptor.recording_sender.lock().unwrap();
+
+            if send_channel.is_none() {
+                println!("no recording sender for stream {}", descriptor.id.0);
+                continue;
+            }
+
             let sender_clone = send_channel.as_ref().unwrap().clone();
 
             self.handle.block_on(async move {
-                sender_clone.send(RecordingCommand::StopRecording).await.unwrap();
+                let _ = sender_clone.send(RecordingCommand::StopRecording).await;
             });
 
             filepaths.push(format!("{}.mp4", descriptor.id.0));
@@ -363,6 +379,8 @@ impl RtspStream {
                                     height: NonZeroU32::new(image_size.1 as u32).unwrap(),
                                     data,
                                 };
+
+                                // TODO: write streams into a frame texture array (stream, channel, width, height)
 
                                 *locked_sink = Some(bgra);
                             },

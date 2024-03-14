@@ -17,6 +17,7 @@ pub struct LightFieldPlugin {
 impl Plugin for LightFieldPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(materials::StreamMaterialsPlugin);
+        app.add_plugins(person_detect::PersonDetectPlugin);
         app.add_plugins(stream::RtspStreamPlugin {
             stream_config: self.stream_config.clone(),
         });

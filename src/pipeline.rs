@@ -58,7 +58,7 @@ pub struct Session {
 impl Session {
     pub fn new(directory: String) -> Self {
         let id = get_next_session_id(&directory);
-        let directory = format!("{}/{}", directory, id);
+        let directory = format!("{}/{}/raw", directory, id);
         std::fs::create_dir_all(&directory).unwrap();
 
         Self { id, directory }

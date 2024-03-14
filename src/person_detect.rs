@@ -1,7 +1,7 @@
 use std::cmp::{max, min};
 
 use bevy::prelude::*;
-use image::DynamicImage;
+use image::{DynamicImage, GenericImageView, imageops::FilterType, ImageBuffer, Luma, RgbImage};
 use rayon::prelude::*;
 
 use crate::{
@@ -14,9 +14,9 @@ pub struct PersonDetectPlugin;
 
 impl Plugin for PersonDetectPlugin {
     fn build(&self, app: &mut App) {
+        app.add_event::<PersonDetectedEvent>();
         app.add_systems(Update, detect_person);
     }
-
 }
 
 
@@ -54,15 +54,20 @@ fn detect_person(
             AssetEvent::Modified { id } => {
                 for (matted_stream, _) in person_detect_streams.iter() {
                     if &matted_stream.output.id() == id {
-                        let image = images.get(&matted_stream.output).unwrap().clone().try_into_dynamic().unwrap();
+                        let image = images.get(&matted_stream.output).unwrap();
 
-                        let bounding_box = masked_bounding_box(&image);
-                        let sum = sum_masked_pixels(&image);
+                        let buffer = ImageBuffer::<Luma<u8>, Vec<u8>>::from_raw(
+                            image.width(),
+                            image.height(),
+                            image.data.clone(),
+                        ).unwrap();
 
-                        println!("bounding box: {:?}, sum: {}", bounding_box, sum);
+                        let bounding_box = masked_bounding_box(&buffer);
+                        let sum = sum_masked_pixels(&buffer);
 
-                        // TODO: add thresholds for detection
-                        let person_detected = false;
+                        let masked_ratio = sum / (buffer.width() * buffer.height()) as f32;
+                        let person_detected = masked_ratio > 0.14;
+
                         if person_detected {
                             ev_person_detected.send(PersonDetectedEvent {
                                 stream_id: matted_stream.stream_id,
@@ -80,19 +85,16 @@ fn detect_person(
 
 
 
-pub fn masked_bounding_box(image: &DynamicImage) -> Option<BoundingBox> {
-    let img = image.as_luma8().unwrap();
-
-    let bounding_boxes = img.enumerate_pixels()
-        .par_bridge()
+pub fn masked_bounding_box(buffer: &ImageBuffer<Luma<u8>, Vec<u8>>) -> Option<BoundingBox> {
+    let bounding_boxes = buffer.enumerate_pixels()
         .filter_map(|(x, y, pixel)| {
-            if pixel[0] > 128 {
+            if pixel.0[0] > 250 {
                 Some((x as i32, y as i32, x as i32, y as i32))
             } else {
                 None
             }
         })
-        .reduce_with(|(
+        .reduce(|(
             min_x1,
             min_y1,
             max_x1,
@@ -127,17 +129,12 @@ pub fn masked_bounding_box(image: &DynamicImage) -> Option<BoundingBox> {
 }
 
 
-pub fn sum_masked_pixels(image: &DynamicImage) -> f32 {
-    let img = image.as_luma8().unwrap();
-    let pixels = img.pixels();
-
-    let count = pixels.par_bridge()
+pub fn sum_masked_pixels(image: &ImageBuffer<Luma<u8>, Vec<u8>>) -> f32 {
+    image.pixels()
         .map(|pixel| {
             pixel.0[0] as f32 / 255.0
         })
-        .sum();
-
-    count
+        .sum()
 }
 
 
@@ -161,8 +158,7 @@ mod tests {
             }
         }
 
-        let dynamic_img = DynamicImage::ImageLuma8(img);
-        let result = masked_bounding_box(&dynamic_img).expect("expected a bounding box");
+        let result = masked_bounding_box(&img).expect("expected a bounding box");
 
         let expected = BoundingBox {
             x:2,
@@ -184,8 +180,7 @@ mod tests {
         img.put_pixel(1, 0, Luma([127]));
         img.put_pixel(2, 0, Luma([63]));
 
-        let dynamic_img = DynamicImage::ImageLuma8(img);
-        let result = sum_masked_pixels(&dynamic_img);
+        let result = sum_masked_pixels(&img);
 
         let expected = (255.0 + 127.0 + 63.0) / 255.0;
         assert_relative_eq!(result, expected);

@@ -137,7 +137,7 @@ pub fn apply_decode(
 }
 
 
-#[derive(Debug, Clone, Copy, PartialEq, Reflect)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect)]
 pub struct StreamId(pub usize);
 
 #[derive(Debug)]

@@ -53,6 +53,7 @@ serde_qs = "0.12"
 retina = "0.4"
 tokio = { version = "1.36", features = ["full"] }
 url = "2.5"
+png = "0.17.13"
 
 
 [dependencies.bevy]

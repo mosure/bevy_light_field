@@ -1,13 +1,44 @@
-use bevy::prelude::*;
+use std::collections::HashMap;
+
+use bevy::{
+    prelude::*,
+    render::{
+        render_asset::RenderAssetUsages,
+        render_resource::Extent3d,
+    },
+};
+use bevy_ort::{
+    inputs,
+    models::modnet::{
+        images_to_modnet_input,
+        modnet_output_to_luma_images,
+    },
+    Onnx,
+};
+use image::{
+    ImageBuffer,
+    Luma,
+};
+use png::Transformations;
 use rayon::prelude::*;
 
-use crate::ffmpeg::FfmpegArgs;
+use crate::{
+    ffmpeg::FfmpegArgs,
+    matting::Modnet,
+    stream::StreamId,
+};
 
 
 pub struct PipelinePlugin;
 impl Plugin for PipelinePlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, generate_raw_frames);
+        app.add_systems(
+            Update,
+            (
+                generate_raw_frames,
+                generate_mask_frames,
+            )
+        );
     }
 }
 
@@ -31,7 +62,7 @@ impl Default for PipelineConfig {
             subject_refinement: false,
             repair_frames: false,
             upsample_frames: false,
-            mask_frames: false,
+            mask_frames: true,
             light_field_cameras: false,
             depth_maps: false,
             gaussian_cloud: false,
@@ -143,19 +174,7 @@ fn generate_raw_frames(
                         }.run();
                     });
 
-                raw_frames.frames = std::fs::read_dir(frame_directory)
-                    .unwrap()
-                    .filter_map(|entry| entry.ok())
-                    .filter(|entry| entry.path().is_dir())
-                    .flat_map(|stream_dir|
-                        std::fs::read_dir(stream_dir.path()).unwrap()
-                            .filter_map(|entry| entry.ok())
-                            .filter(|entry| entry.path().is_file() && entry.path().extension().and_then(|s| s.to_str()) == Some("png"))
-                            .map(|entry| entry.path().to_str().unwrap().to_string())
-                    )
-                    .collect::<Vec<_>>();
-            } else {
-                println!("RawFrames already exists for session {}, loading...", session.id);
+                raw_frames.reload();
             }
 
             commands.entity(entity).insert(raw_frames);
@@ -164,15 +183,189 @@ fn generate_raw_frames(
 }
 
 
-#[derive(Component, Default, Reflect)]
+fn generate_mask_frames(
+    mut commands: Commands,
+    raw_frames: Query<
+        (
+            Entity,
+            &PipelineConfig,
+            &RawFrames,
+            &Session,
+        ),
+        Without<MaskFrames>,
+    >,
+    modnet: Res<Modnet>,
+    onnx_assets: Res<Assets<Onnx>>,
+) {
+    for (
+        entity,
+        config,
+        raw_frames,
+        session,
+    ) in raw_frames.iter() {
+        if config.mask_frames {
+            if onnx_assets.get(&modnet.onnx).is_none() {
+                return;
+            }
+
+            let onnx = onnx_assets.get(&modnet.onnx).unwrap();
+            let onnx_session_arc = onnx.session.clone();
+            let onnx_session_lock = onnx_session_arc.lock().map_err(|e| e.to_string()).unwrap();
+            let onnx_session = onnx_session_lock.as_ref().ok_or("failed to get session from ONNX asset").unwrap();
+
+            let run_node = !MaskFrames::exists(session);
+            let mut mask_frames = MaskFrames::load_from_session(session);
+
+            if run_node {
+                raw_frames.frames.keys()
+                    .for_each(|stream_id| {
+                        let output_directory = format!("{}/{}", mask_frames.directory, stream_id.0);
+                        std::fs::create_dir_all(&output_directory).unwrap();
+                    });
+
+                // TODO: support async ort inference (re. progress bars)
+                let mask_images = raw_frames.frames.iter()
+                    .map(|(stream_id, frames)| {
+                        let frames = frames.iter()
+                            .map(|frame| {
+                                let mut decoder = png::Decoder::new(std::fs::File::open(frame).unwrap());
+                                decoder.set_transformations(Transformations::EXPAND | Transformations::ALPHA);
+                                let mut reader = decoder.read_info().unwrap();
+                                let mut img_data = vec![0; reader.output_buffer_size()];
+                                let _ = reader.next_frame(&mut img_data).unwrap();
+
+                                assert_eq!(reader.info().bytes_per_pixel(), 3);
+
+                                let width = reader.info().width;
+                                let height = reader.info().height;
+
+                                // TODO: separate image loading and onnx inference (so the image loading result can be viewed in the pipeline grid view)
+                                let image = Image::new(
+                                    Extent3d {
+                                        width: width as u32,
+                                        height: height as u32,
+                                        depth_or_array_layers: 1,
+                                    },
+                                    bevy::render::render_resource::TextureDimension::D2,
+                                    img_data,
+                                    bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+                                    RenderAssetUsages::all(),
+                                );
+
+                                let tensor_input = images_to_modnet_input(&[&image], None);
+
+                                let input_values = inputs!["input" => tensor_input.view()].map_err(|e| e.to_string()).unwrap();
+                                let outputs = onnx_session.run(input_values).map_err(|e| e.to_string());
+                                let binding = outputs.ok().unwrap();
+                                let output_value: &ort::Value = binding.get("output").unwrap();
+
+                                let frame_idx = std::path::Path::new(frame).file_stem().unwrap().to_str().unwrap();
+
+                                (frame_idx, modnet_output_to_luma_images(output_value).pop().unwrap())
+                            })
+                            .collect::<Vec<_>>();
+
+                        (stream_id, frames)
+                    })
+                    .collect::<Vec<_>>();
+
+                mask_images.iter()
+                    .for_each(|(stream_id, frames)| {
+                        let output_directory = format!("{}/{}", mask_frames.directory, stream_id.0);
+                        let mask_paths = frames.iter()
+                            .map(|(frame_idx, frame)| {
+                                let path = format!("{}/{}.png", output_directory, frame_idx);
+
+                                let buffer = ImageBuffer::<Luma<u8>, Vec<u8>>::from_raw(
+                                    frame.width(),
+                                    frame.height(),
+                                    frame.data.clone(),
+                                ).unwrap();
+
+                                let _ = buffer.save(&path);
+
+                                path
+                            })
+                            .collect::<Vec<_>>();
+
+                        mask_frames.frames.insert(**stream_id, mask_paths);
+                    });
+            }
+
+            commands.entity(entity).insert(mask_frames);
+        }
+    }
+}
+
+
+// TODO: support loading maskframes -> images into a pipeline mask viewer
+
+
+#[derive(Component, Default)]
 pub struct RawFrames {
-    pub frames: Vec<String>,
+    pub frames: HashMap<StreamId, Vec<String>>,
+    pub directory: String,
 }
 impl RawFrames {
     pub fn load_from_session(
         session: &Session,
     ) -> Self {
+        let directory = format!("{}/frames", session.directory);
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let mut raw_frames = Self {
+            frames: HashMap::new(),
+            directory,
+        };
+        raw_frames.reload();
+
+        raw_frames
+    }
+
+    pub fn reload(&mut self) {
+        std::fs::read_dir(&self.directory)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_dir())
+            .map(|stream_dir| {
+                let stream_id = StreamId(stream_dir.path().file_name().unwrap().to_str().unwrap().parse::<usize>().unwrap());
+
+                let frames = std::fs::read_dir(stream_dir.path()).unwrap()
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| entry.path().is_file() && entry.path().extension().and_then(|s| s.to_str()) == Some("png"))
+                    .map(|entry| entry.path().to_str().unwrap().to_string())
+                    .collect::<Vec<_>>();
+
+                (stream_id, frames)
+            })
+            .for_each(|(stream_id, frames)| {
+                self.frames.insert(stream_id, frames);
+            });
+    }
+
+    pub fn exists(
+        session: &Session,
+    ) -> bool {
         let output_directory = format!("{}/frames", session.directory);
+        std::fs::metadata(output_directory).is_ok()
+    }
+
+    pub fn image(&self, _camera: usize, _frame: usize) -> Option<Image> {
+        todo!()
+    }
+}
+
+
+
+#[derive(Component, Default, Reflect)]
+pub struct RotateFrames {
+    pub frames: Vec<String>,
+}
+impl RotateFrames {
+    pub fn load_from_session(
+        session: &Session,
+    ) -> Self {
+        let output_directory = format!("{}/rotated_frames", session.directory);
         std::fs::create_dir_all(output_directory).unwrap();
 
         // TODO: load all files that are already in the directory
@@ -195,20 +388,54 @@ impl RawFrames {
 }
 
 
+
 #[derive(Component, Default, Reflect)]
 pub struct MaskFrames {
-    pub frames: Vec<String>,
+    pub frames: HashMap<StreamId, Vec<String>>,
+    pub directory: String
 }
 impl MaskFrames {
-    pub fn new(
+    pub fn load_from_session(
         session: &Session,
     ) -> Self {
-        let output_directory = format!("{}/masks", session.directory);
-        std::fs::create_dir_all(output_directory).unwrap();
+        let directory = format!("{}/masks", session.directory);
+        std::fs::create_dir_all(&directory).unwrap();
 
-        Self {
-            frames: vec![],
-        }
+        let mut mask_frames = Self {
+            frames: HashMap::new(),
+            directory,
+        };
+        mask_frames.reload();
+
+        mask_frames
+    }
+
+    pub fn reload(&mut self) {
+        std::fs::read_dir(&self.directory)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_dir())
+            .map(|stream_dir| {
+                let stream_id = StreamId(stream_dir.path().file_name().unwrap().to_str().unwrap().parse::<usize>().unwrap());
+
+                let frames = std::fs::read_dir(stream_dir.path()).unwrap()
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| entry.path().is_file() && entry.path().extension().and_then(|s| s.to_str()) == Some("png"))
+                    .map(|entry| entry.path().to_str().unwrap().to_string())
+                    .collect::<Vec<_>>();
+
+                (stream_id, frames)
+            })
+            .for_each(|(stream_id, frames)| {
+                self.frames.insert(stream_id, frames);
+            });
+    }
+
+    pub fn exists(
+        session: &Session,
+    ) -> bool {
+        let output_directory = format!("{}/masks", session.directory);
+        std::fs::metadata(output_directory).is_ok()
     }
 
     pub fn image(&self, _camera: usize, _frame: usize) -> Option<Image> {

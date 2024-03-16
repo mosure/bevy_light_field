@@ -113,12 +113,6 @@ impl Session {
 }
 
 
-pub trait PipelineNode {
-    fn new(session: &Session) -> Self;
-    fn exists(session: &Session) -> bool;
-}
-
-
 #[derive(Component, Default, Reflect)]
 pub struct RawStreams {
     pub streams: Vec<String>,
@@ -438,8 +432,6 @@ fn generate_yolo_frames(
             } else {
                 info!("yolo frames already exist for session {}", session.id);
             }
-
-            println!("{:?}", yolo_frames.frames.iter().map(|(_stream_id, frames)| frames.len()).reduce(|a, b| a + b).unwrap());
 
             commands.entity(entity).insert(yolo_frames);
         }

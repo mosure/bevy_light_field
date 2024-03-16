@@ -358,15 +358,18 @@ fn automatic_recording(
         if person_timeout.elapsed_secs() > 3.0 {
             person_timeout.reset();
 
-            info!("no person detected for 3 seconds, stopping recording");
+            info!("no person detected for 3 seconds, stop recording");
 
-            let session_entity = live_session.0.take().unwrap();
-            let raw_streams = stream_manager.stop_recording();
+            let _session_entity = live_session.0.take().unwrap();
+            let _raw_streams = stream_manager.stop_recording();
 
-            commands.entity(session_entity)
-                .insert(RawStreams {
-                    streams: raw_streams,
-                });
+            // TODO: TODO: add a recording finished event when all streams are closed, then execute the following command if pipeline auto-processing is enabled (not ideal for fast recording)
+
+            // commands.entity(session_entity)
+            //     .insert(RawStreams {
+            //         streams: raw_streams,
+            //     })
+            //     .insert(PipelineConfig::default());
         }
 
         person_timeout.tick(time.delta());
@@ -390,13 +393,7 @@ fn automatic_recording(
         );
 
         // TODO: build pipeline config from args
-        let entity = commands.spawn(
-            StreamSessionBundle {
-                session,
-                raw_streams: RawStreams::default(),
-                config: PipelineConfig::default(),
-            },
-        ).id();
+        let entity = commands.spawn(session).id();
         live_session.0 = Some(entity);
     }
 }

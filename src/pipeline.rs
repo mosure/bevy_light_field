@@ -9,9 +9,16 @@ use bevy::{
 };
 use bevy_ort::{
     inputs,
-    models::modnet::{
-        images_to_modnet_input,
-        modnet_output_to_luma_images,
+    models::{
+        modnet::{
+            images_to_modnet_input,
+            modnet_output_to_luma_images,
+        },
+        yolo_v8::{
+            BoundingBox,
+            prepare_input,
+            process_output,
+        },
     },
     Onnx,
 };
@@ -26,6 +33,7 @@ use crate::{
     ffmpeg::FfmpegArgs,
     matting::Modnet,
     stream::StreamId,
+    yolo::YoloV8,
 };
 
 
@@ -37,6 +45,7 @@ impl Plugin for PipelinePlugin {
             (
                 generate_raw_frames,
                 generate_mask_frames,
+                generate_yolo_frames,
             )
         );
     }
@@ -46,7 +55,7 @@ impl Plugin for PipelinePlugin {
 #[derive(Component, Reflect)]
 pub struct PipelineConfig {
     pub raw_frames: bool,
-    pub subject_refinement: bool,           // https://github.com/onnx/models/tree/main/validated/vision/body_analysis/ultraface
+    pub yolo: bool,                         // https://github.com/ultralytics/ultralytics
     pub repair_frames: bool,                // https://huggingface.co/docs/diffusers/en/optimization/onnx & https://github.com/bnm6900030/swintormer
     pub upsample_frames: bool,              // https://huggingface.co/ssube/stable-diffusion-x4-upscaler-onnx
     pub mask_frames: bool,                  // https://github.com/ZHKKKe/MODNet
@@ -59,7 +68,7 @@ impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
             raw_frames: true,
-            subject_refinement: false,
+            yolo: true,
             repair_frames: false,
             upsample_frames: false,
             mask_frames: true,
@@ -156,11 +165,13 @@ fn generate_raw_frames(
             let mut raw_frames = RawFrames::load_from_session(session);
 
             if run_node {
+                info!("generating raw frames for session {}", session.id);
+
                 let frame_directory = format!("{}/frames", session.directory);
 
                 raw_streams.streams.par_iter()
-                    .enumerate()
-                    .for_each(|(stream_idx, mp4_path)| {
+                    .for_each(|mp4_path| {
+                        let stream_idx = std::path::Path::new(mp4_path).file_stem().unwrap().to_str().unwrap().parse::<usize>().unwrap();
                         let output_directory = format!("{}/{}", frame_directory, stream_idx);
                         std::fs::create_dir_all(&output_directory).unwrap();
 
@@ -175,6 +186,8 @@ fn generate_raw_frames(
                     });
 
                 raw_frames.reload();
+            } else {
+                info!("raw frames already exist for session {}", session.id);
             }
 
             commands.entity(entity).insert(raw_frames);
@@ -217,6 +230,8 @@ fn generate_mask_frames(
             let mut mask_frames = MaskFrames::load_from_session(session);
 
             if run_node {
+                info!("generating mask frames for session {}", session.id);
+
                 raw_frames.frames.keys()
                     .for_each(|stream_id| {
                         let output_directory = format!("{}/{}", mask_frames.directory, stream_id.0);
@@ -290,12 +305,147 @@ fn generate_mask_frames(
 
                         mask_frames.frames.insert(**stream_id, mask_paths);
                     });
+            } else {
+                info!("mask frames already exist for session {}", session.id);
             }
 
             commands.entity(entity).insert(mask_frames);
         }
     }
 }
+
+
+fn generate_yolo_frames(
+    mut commands: Commands,
+    raw_frames: Query<
+        (
+            Entity,
+            &PipelineConfig,
+            &RawFrames,
+            &Session,
+        ),
+        Without<YoloFrames>,
+    >,
+    yolo_v8: Res<YoloV8>,
+    onnx_assets: Res<Assets<Onnx>>,
+) {
+    for (
+        entity,
+        config,
+        raw_frames,
+        session,
+    ) in raw_frames.iter() {
+        if config.yolo {
+            if onnx_assets.get(&yolo_v8.onnx).is_none() {
+                return;
+            }
+
+            let onnx = onnx_assets.get(&yolo_v8.onnx).unwrap();
+            let onnx_session_arc = onnx.session.clone();
+            let onnx_session_lock = onnx_session_arc.lock().map_err(|e| e.to_string()).unwrap();
+            let onnx_session = onnx_session_lock.as_ref().ok_or("failed to get session from ONNX asset").unwrap();
+
+            let run_node = !YoloFrames::exists(session);
+            let mut yolo_frames = YoloFrames::load_from_session(session);
+
+            if run_node {
+                info!("generating yolo frames for session {}", session.id);
+
+                raw_frames.frames.keys()
+                    .for_each(|stream_id| {
+                        let output_directory = format!("{}/{}", yolo_frames.directory, stream_id.0);
+                        std::fs::create_dir_all(&output_directory).unwrap();
+                    });
+
+                // TODO: support async ort inference (re. progress bars)
+                let bounding_box_streams = raw_frames.frames.iter()
+                    .map(|(stream_id, frames)| {
+                        let frames = frames.iter()
+                            .map(|frame| {
+                                let mut decoder = png::Decoder::new(std::fs::File::open(frame).unwrap());
+                                decoder.set_transformations(Transformations::EXPAND | Transformations::ALPHA);
+                                let mut reader = decoder.read_info().unwrap();
+                                let mut img_data = vec![0; reader.output_buffer_size()];
+                                let _ = reader.next_frame(&mut img_data).unwrap();
+
+                                assert_eq!(reader.info().bytes_per_pixel(), 3);
+
+                                let width = reader.info().width;
+                                let height = reader.info().height;
+
+                                // TODO: separate image loading and onnx inference (so the image loading result can be viewed in the pipeline grid view)
+                                let image = Image::new(
+                                    Extent3d {
+                                        width: width as u32,
+                                        height: height as u32,
+                                        depth_or_array_layers: 1,
+                                    },
+                                    bevy::render::render_resource::TextureDimension::D2,
+                                    img_data,
+                                    bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+                                    RenderAssetUsages::all(),
+                                );
+
+                                let model_width = onnx_session.inputs[0].input_type.tensor_dimensions().unwrap()[2] as u32;
+                                let model_height = onnx_session.inputs[0].input_type.tensor_dimensions().unwrap()[3] as u32;
+
+                                let tensor_input = prepare_input(
+                                    &image,
+                                    model_width,
+                                    model_height,
+                                );
+
+                                let input_values = inputs!["images" => tensor_input.view()].map_err(|e| e.to_string()).unwrap();
+                                let outputs = onnx_session.run(input_values).map_err(|e| e.to_string());
+                                let binding = outputs.ok().unwrap();
+                                let output_value: &ort::Value = binding.get("output0").unwrap();
+
+                                let frame_idx = std::path::Path::new(frame).file_stem().unwrap().to_str().unwrap();
+
+                                (
+                                    frame_idx,
+                                    process_output(
+                                        output_value,
+                                        width,
+                                        height,
+                                        model_width,
+                                        model_height,
+                                    ),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+
+
+                        (stream_id, frames)
+                    })
+                    .collect::<Vec<_>>();
+
+                bounding_box_streams.iter()
+                    .for_each(|(stream_id, frames)| {
+                        let output_directory = format!("{}/{}", yolo_frames.directory, stream_id.0);
+                        let bounding_boxes = frames.iter()
+                            .map(|(frame_idx, bounding_boxes)| {
+                                let path = format!("{}/{}.json", output_directory, frame_idx);
+
+                                let _ = serde_json::to_writer(std::fs::File::create(path).unwrap(), bounding_boxes);
+
+                                bounding_boxes.clone()
+                            })
+                            .collect::<Vec<_>>();
+
+                        yolo_frames.frames.insert(**stream_id, bounding_boxes);
+                    });
+            } else {
+                info!("yolo frames already exist for session {}", session.id);
+            }
+
+            println!("{:?}", yolo_frames.frames.iter().map(|(_stream_id, frames)| frames.len()).reduce(|a, b| a + b).unwrap());
+
+            commands.entity(entity).insert(yolo_frames);
+        }
+    }
+}
+
 
 
 // TODO: support loading maskframes -> images into a pipeline mask viewer
@@ -347,6 +497,84 @@ impl RawFrames {
         session: &Session,
     ) -> bool {
         let output_directory = format!("{}/frames", session.directory);
+        std::fs::metadata(output_directory).is_ok()
+    }
+
+    pub fn image(&self, _camera: usize, _frame: usize) -> Option<Image> {
+        todo!()
+    }
+}
+
+
+// TODO: add YOLO for frame filtering and camera calibration
+#[derive(Component, Default)]
+pub struct YoloFrames {
+    pub frames: HashMap<StreamId, Vec<Vec<BoundingBox>>>,
+    pub directory: String,
+}
+impl YoloFrames {
+    pub fn load_from_session(
+        session: &Session,
+    ) -> Self {
+        let directory = format!("{}/yolo_frames", session.directory);
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let mut yolo_frames = Self {
+            frames: HashMap::new(),
+            directory,
+        };
+        yolo_frames.reload();
+
+        yolo_frames
+    }
+
+    pub fn reload(&mut self) {
+        std::fs::read_dir(&self.directory)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_dir())
+            .map(|stream_dir| {
+                let stream_id = StreamId(stream_dir.path().file_name().unwrap().to_str().unwrap().parse::<usize>().unwrap());
+
+                let frames = std::fs::read_dir(stream_dir.path()).unwrap()
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| entry.path().is_file() && entry.path().extension().and_then(|s| s.to_str()) == Some("json"))
+                    .map(|entry| std::fs::File::open(entry.path()).unwrap())
+                    .map(|yolo_json_file| {
+                        let bounding_boxes: Vec<BoundingBox> = serde_json::from_reader(&yolo_json_file).unwrap();
+
+                        bounding_boxes
+                    })
+                    .collect::<Vec<_>>();
+
+                // TODO: parse the json at each frame path to get the bounding boxes
+
+                (stream_id, frames)
+            })
+            .for_each(|(stream_id, frames)| {
+                self.frames.insert(stream_id, frames);
+            });
+    }
+
+    pub fn write(&self) {
+        self.frames.iter()
+            .for_each(|(stream_id, frames)| {
+                let output_directory = format!("{}/{}", self.directory, stream_id.0);
+                std::fs::create_dir_all(&output_directory).unwrap();
+
+                frames.iter()
+                    .enumerate()
+                    .for_each(|(frame_idx, bounding_boxes)| {
+                        let path = format!("{}/{}.json", output_directory, frame_idx);
+                        let _ = serde_json::to_writer(std::fs::File::create(path).unwrap(), bounding_boxes);
+                    });
+            });
+    }
+
+    pub fn exists(
+        session: &Session,
+    ) -> bool {
+        let output_directory = format!("{}/yolo_frames", session.directory);
         std::fs::metadata(output_directory).is_ok()
     }
 

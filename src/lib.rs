@@ -9,6 +9,7 @@ pub mod mp4;
 pub mod person_detect;
 pub mod pipeline;
 pub mod stream;
+pub mod yolo;
 
 
 pub struct LightFieldPlugin {
@@ -23,5 +24,6 @@ impl Plugin for LightFieldPlugin {
         app.add_plugins(stream::RtspStreamPlugin {
             stream_config: self.stream_config.clone(),
         });
+        app.add_plugins(yolo::YoloPlugin);
     }
 }

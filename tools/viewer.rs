@@ -358,7 +358,7 @@ fn automatic_recording(
         if person_timeout.elapsed_secs() > 3.0 {
             person_timeout.reset();
 
-            println!("no person detected for 3 seconds, stopping recording");
+            info!("no person detected for 3 seconds, stopping recording");
 
             let session_entity = live_session.0.take().unwrap();
             let raw_streams = stream_manager.stop_recording();

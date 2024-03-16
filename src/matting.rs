@@ -160,7 +160,7 @@ fn matting_inference(
                 command_queue
             },
             Err(error) => {
-                eprintln!("inference failed: {}", error);
+                error!("inference failed: {}", error);
                 CommandQueue::default()
             }
         }

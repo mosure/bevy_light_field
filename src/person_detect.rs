@@ -20,7 +20,7 @@ impl Plugin for PersonDetectPlugin {
 
 
 #[derive(Component)]
-pub struct DetectPersons;
+pub struct DetectPersons;  // TODO: add option for mask vs yolo detection
 
 
 #[derive(Debug, Clone, Reflect, PartialEq)]

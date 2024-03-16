@@ -302,7 +302,7 @@ impl RtspStreamManager {
             let send_channel = descriptor.recording_sender.lock().unwrap();
 
             if send_channel.is_none() {
-                println!("no recording sender for stream {}", descriptor.id.0);
+                warn!("no recording sender for stream {}", descriptor.id.0);
                 continue;
             }
 
@@ -323,7 +323,7 @@ impl RtspStreamManager {
             let send_channel = descriptor.recording_sender.lock().unwrap();
 
             if send_channel.is_none() {
-                println!("no recording sender for stream {}", descriptor.id.0);
+                warn!("no recording sender for stream {}", descriptor.id.0);
                 continue;
             }
 
@@ -389,11 +389,11 @@ impl RtspStream {
                             file,
                         ).await.ok();
 
-                        println!("writing stream {}", self.handle.id.0);
+                        info!("writing stream {}", self.handle.id.0);
                     },
                     RecordingCommand::StopRecording => {
                         if let Some(writer) = self.writer.take() {
-                            println!("stopped recording stream {}", self.handle.id.0);
+                            info!("stopped recording stream {}", self.handle.id.0);
                             writer.finish().await.ok();
                         }
                     },

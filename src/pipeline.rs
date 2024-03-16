@@ -142,6 +142,7 @@ impl RawStreams {
 }
 
 
+// TODO: use the async task pool for all generate systems https://crates.io/crates/bevy-async-task
 fn generate_raw_frames(
     mut commands: Commands,
     raw_streams: Query<
@@ -238,7 +239,6 @@ fn generate_mask_frames(
                         std::fs::create_dir_all(&output_directory).unwrap();
                     });
 
-                // TODO: support async ort inference (re. progress bars)
                 let mask_images = raw_frames.frames.iter()
                     .map(|(stream_id, frames)| {
                         let frames = frames.iter()

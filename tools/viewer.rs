@@ -29,6 +29,7 @@ use bevy_args::{
 use bevy_light_field::{
     LightFieldPlugin,
     materials::foreground::ForegroundMaterial,
+    matting::MattingPlugin,
     person_detect::{
         DetectPersons,
         PersonDetectedEvent,
@@ -45,11 +46,7 @@ use bevy_light_field::{
     },
 };
 
-#[cfg(feature = "person_matting")]
-use bevy_light_field::matting::{
-    MattedStream,
-    MattingPlugin,
-};
+use bevy_light_field::matting::MattedStream;
 
 
 #[derive(
@@ -120,8 +117,6 @@ fn main() {
             LightFieldPlugin {
                 stream_config: args.config.clone(),
             },
-
-            #[cfg(feature = "person_matting")]
             MattingPlugin::new((
                 args.max_matting_width,
                 args.max_matting_height,
@@ -131,7 +126,6 @@ fn main() {
         .add_systems(
             Startup,
             (
-                #[cfg(feature = "person_matting")]
                 create_mask_streams,
                 setup_camera,
                 select_session_from_args,
@@ -164,7 +158,6 @@ fn main() {
 
 
 // TODO: move to MattingPlugin
-#[cfg(feature = "person_matting")]
 fn create_mask_streams(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,

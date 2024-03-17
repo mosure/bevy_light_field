@@ -55,7 +55,7 @@ pub struct RtspStreamPlugin {
 impl Plugin for RtspStreamPlugin {
     fn build(&self, app: &mut App) {
         let config = std::fs::File::open(&self.stream_config).unwrap();
-        let stream_uris = serde_json::from_reader::<_, StreamUris>(config).unwrap();
+        let stream_uris = serde_json::from_reader::<_, StreamDescriptors>(config).unwrap();
 
         app
             .insert_resource(stream_uris)
@@ -69,7 +69,7 @@ impl Plugin for RtspStreamPlugin {
 fn create_streams(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
-    stream_uris: Res<StreamUris>,
+    stream_uris: Res<StreamDescriptors>,
 ) {
     stream_uris.0.iter()
         .enumerate()
@@ -154,7 +154,7 @@ pub enum StreamTransport {
     Udp,
 }
 
-#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+#[derive(Component, Clone, Default, Debug, Serialize, Deserialize)]
 pub struct StreamDescriptor {
     pub uri: String,
 
@@ -163,10 +163,12 @@ pub struct StreamDescriptor {
 
     pub visible: Option<bool>,
     pub person_detection: Option<bool>,
+
+    pub rotation: Option<f32>,
 }
 
 #[derive(Resource, Clone, Debug, Default, Serialize, Deserialize)]
-pub struct StreamUris(pub Vec<StreamDescriptor>);
+pub struct StreamDescriptors(pub Vec<StreamDescriptor>);
 
 
 #[derive(Component, Clone)]

@@ -1,10 +1,9 @@
 use bevy::prelude::*;
-
-#[cfg(feature = "person_matting")]
-pub mod matting;
+use bevy_ort::BevyOrtPlugin;
 
 pub mod ffmpeg;
 pub mod materials;
+pub mod matting;
 pub mod mp4;
 pub mod person_detect;
 pub mod pipeline;
@@ -18,6 +17,8 @@ pub struct LightFieldPlugin {
 
 impl Plugin for LightFieldPlugin {
     fn build(&self, app: &mut App) {
+        app.add_plugins(BevyOrtPlugin);
+
         app.add_plugins(materials::StreamMaterialsPlugin);
         app.add_plugins(person_detect::PersonDetectPlugin);
         app.add_plugins(pipeline::PipelinePlugin);

@@ -8,42 +8,56 @@ use bevy::{
     },
 };
 use bevy_ort::{
-    inputs,
     models::{
         modnet::{
-            images_to_modnet_input,
-            modnet_output_to_luma_images,
+            modnet_inference,
+            Modnet,
+            ModnetPlugin
         },
         yolo_v8::{
+            yolo_inference,
             BoundingBox,
-            prepare_input,
-            process_output,
+            Yolo,
+            YoloPlugin,
         },
     },
     Onnx,
 };
 use image::{
+    DynamicImage,
+    GenericImageView,
     ImageBuffer,
     Luma,
+    Rgb,
+};
+use imageproc::geometric_transformations::{
+    rotate_about_center,
+    Interpolation,
 };
 use png::Transformations;
 use rayon::prelude::*;
 
 use crate::{
     ffmpeg::FfmpegArgs,
-    matting::Modnet,
-    stream::StreamId,
-    yolo::YoloV8,
+    stream::{
+        StreamId,
+        StreamDescriptors,
+    },
 };
 
 
 pub struct PipelinePlugin;
 impl Plugin for PipelinePlugin {
     fn build(&self, app: &mut App) {
+        app.add_plugins((
+            ModnetPlugin,
+            YoloPlugin,
+        ));
         app.add_systems(
             Update,
             (
                 generate_raw_frames,
+                generate_rotated_frames,
                 generate_mask_frames,
                 generate_yolo_frames,
             )
@@ -55,6 +69,7 @@ impl Plugin for PipelinePlugin {
 #[derive(Component, Reflect)]
 pub struct PipelineConfig {
     pub raw_frames: bool,
+    pub rotate_raw_frames: bool,
     pub yolo: bool,                         // https://github.com/ultralytics/ultralytics
     pub repair_frames: bool,                // https://huggingface.co/docs/diffusers/en/optimization/onnx & https://github.com/bnm6900030/swintormer
     pub upsample_frames: bool,              // https://huggingface.co/ssube/stable-diffusion-x4-upscaler-onnx
@@ -68,6 +83,7 @@ impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
             raw_frames: true,
+            rotate_raw_frames: true,
             yolo: true,
             repair_frames: false,
             upsample_frames: false,
@@ -191,13 +207,79 @@ fn generate_raw_frames(
 }
 
 
-fn generate_mask_frames(
+fn generate_rotated_frames(
     mut commands: Commands,
+    descriptors: Res<StreamDescriptors>,
     raw_frames: Query<
         (
             Entity,
             &PipelineConfig,
             &RawFrames,
+            &Session,
+        ),
+        Without<RotatedFrames>,
+    >,
+) {
+    // TODO: create a caching/loading system wrapper over run_node interior
+    for (
+        entity,
+        config,
+        raw_frames,
+        session,
+    ) in raw_frames.iter() {
+        // TODO: get stream descriptor rotation
+
+        if config.rotate_raw_frames {
+            let run_node = !RotatedFrames::exists(session);
+            let mut rotated_frames = RotatedFrames::load_from_session(session);
+
+            if run_node {
+                let rotations: HashMap<StreamId, f32> = descriptors.0.iter()
+                    .enumerate()
+                    .map(|(id, descriptor)| (StreamId(id), descriptor.rotation.unwrap_or_default()))
+                    .collect();
+
+                info!("generating rotated frames for session {}", session.id);
+
+                raw_frames.frames.iter()
+                    .for_each(|(stream_id, frames)| {
+                        let output_directory = format!("{}/{}", rotated_frames.directory, stream_id.0);
+                        std::fs::create_dir_all(&output_directory).unwrap();
+
+                        let frames = frames.par_iter()
+                            .map(|frame| {
+                                let frame_idx = std::path::Path::new(frame).file_stem().unwrap().to_str().unwrap();
+                                let output_path = format!("{}/{}.png", output_directory, frame_idx);
+
+                                rotate_image(
+                                    std::path::Path::new(frame),
+                                    std::path::Path::new(&output_path),
+                                    rotations[stream_id],
+                                ).unwrap();
+
+                                output_path
+                            })
+                            .collect::<Vec<_>>();
+
+                            rotated_frames.frames.insert(*stream_id, frames);
+                    });
+            } else {
+                info!("rotated frames already exist for session {}", session.id);
+            }
+
+            commands.entity(entity).insert(rotated_frames);
+        }
+    }
+}
+
+
+fn generate_mask_frames(
+    mut commands: Commands,
+    frames: Query<
+        (
+            Entity,
+            &PipelineConfig,
+            &RotatedFrames,
             &Session,
         ),
         Without<MaskFrames>,
@@ -208,9 +290,9 @@ fn generate_mask_frames(
     for (
         entity,
         config,
-        raw_frames,
+        frames,
         session,
-    ) in raw_frames.iter() {
+    ) in frames.iter() {
         if config.mask_frames {
             if onnx_assets.get(&modnet.onnx).is_none() {
                 return;
@@ -227,13 +309,13 @@ fn generate_mask_frames(
             if run_node {
                 info!("generating mask frames for session {}", session.id);
 
-                raw_frames.frames.keys()
+                frames.frames.keys()
                     .for_each(|stream_id| {
                         let output_directory = format!("{}/{}", mask_frames.directory, stream_id.0);
-                        std::fs::create_dir_all(&output_directory).unwrap();
+                        std::fs::create_dir_all(output_directory).unwrap();
                     });
 
-                let mask_images = raw_frames.frames.iter()
+                let mask_images = frames.frames.iter()
                     .map(|(stream_id, frames)| {
                         let frames = frames.iter()
                             .map(|frame| {
@@ -251,8 +333,8 @@ fn generate_mask_frames(
                                 // TODO: separate image loading and onnx inference (so the image loading result can be viewed in the pipeline grid view)
                                 let image = Image::new(
                                     Extent3d {
-                                        width: width as u32,
-                                        height: height as u32,
+                                        width,
+                                        height,
                                         depth_or_array_layers: 1,
                                     },
                                     bevy::render::render_resource::TextureDimension::D2,
@@ -261,16 +343,16 @@ fn generate_mask_frames(
                                     RenderAssetUsages::all(),
                                 );
 
-                                let tensor_input = images_to_modnet_input(&[&image], None);
-
-                                let input_values = inputs!["input" => tensor_input.view()].map_err(|e| e.to_string()).unwrap();
-                                let outputs = onnx_session.run(input_values).map_err(|e| e.to_string());
-                                let binding = outputs.ok().unwrap();
-                                let output_value: &ort::Value = binding.get("output").unwrap();
-
                                 let frame_idx = std::path::Path::new(frame).file_stem().unwrap().to_str().unwrap();
 
-                                (frame_idx, modnet_output_to_luma_images(output_value).pop().unwrap())
+                                (
+                                    frame_idx,
+                                    modnet_inference(
+                                        onnx_session,
+                                        &[&image],
+                                        Some((512, 512)),
+                                    ).pop().unwrap(),
+                                )
                             })
                             .collect::<Vec<_>>();
 
@@ -320,7 +402,7 @@ fn generate_yolo_frames(
         ),
         Without<YoloFrames>,
     >,
-    yolo_v8: Res<YoloV8>,
+    yolo: Res<Yolo>,
     onnx_assets: Res<Assets<Onnx>>,
 ) {
     for (
@@ -330,11 +412,11 @@ fn generate_yolo_frames(
         session,
     ) in raw_frames.iter() {
         if config.yolo {
-            if onnx_assets.get(&yolo_v8.onnx).is_none() {
+            if onnx_assets.get(&yolo.onnx).is_none() {
                 return;
             }
 
-            let onnx = onnx_assets.get(&yolo_v8.onnx).unwrap();
+            let onnx = onnx_assets.get(&yolo.onnx).unwrap();
             let onnx_session_arc = onnx.session.clone();
             let onnx_session_lock = onnx_session_arc.lock().map_err(|e| e.to_string()).unwrap();
             let onnx_session = onnx_session_lock.as_ref().ok_or("failed to get session from ONNX asset").unwrap();
@@ -348,7 +430,7 @@ fn generate_yolo_frames(
                 raw_frames.frames.keys()
                     .for_each(|stream_id| {
                         let output_directory = format!("{}/{}", yolo_frames.directory, stream_id.0);
-                        std::fs::create_dir_all(&output_directory).unwrap();
+                        std::fs::create_dir_all(output_directory).unwrap();
                     });
 
                 // TODO: support async ort inference (re. progress bars)
@@ -370,8 +452,8 @@ fn generate_yolo_frames(
                                 // TODO: separate image loading and onnx inference (so the image loading result can be viewed in the pipeline grid view)
                                 let image = Image::new(
                                     Extent3d {
-                                        width: width as u32,
-                                        height: height as u32,
+                                        width,
+                                        height,
                                         depth_or_array_layers: 1,
                                     },
                                     bevy::render::render_resource::TextureDimension::D2,
@@ -380,35 +462,18 @@ fn generate_yolo_frames(
                                     RenderAssetUsages::all(),
                                 );
 
-                                let model_width = onnx_session.inputs[0].input_type.tensor_dimensions().unwrap()[2] as u32;
-                                let model_height = onnx_session.inputs[0].input_type.tensor_dimensions().unwrap()[3] as u32;
-
-                                let tensor_input = prepare_input(
-                                    &image,
-                                    model_width,
-                                    model_height,
-                                );
-
-                                let input_values = inputs!["images" => tensor_input.view()].map_err(|e| e.to_string()).unwrap();
-                                let outputs = onnx_session.run(input_values).map_err(|e| e.to_string());
-                                let binding = outputs.ok().unwrap();
-                                let output_value: &ort::Value = binding.get("output0").unwrap();
-
                                 let frame_idx = std::path::Path::new(frame).file_stem().unwrap().to_str().unwrap();
 
                                 (
                                     frame_idx,
-                                    process_output(
-                                        output_value,
-                                        width,
-                                        height,
-                                        model_width,
-                                        model_height,
+                                    yolo_inference(
+                                        onnx_session,
+                                        &image,
+                                        0.5,
                                     ),
                                 )
                             })
                             .collect::<Vec<_>>();
-
 
                         (stream_id, frames)
                     })
@@ -435,6 +500,62 @@ fn generate_yolo_frames(
 
             commands.entity(entity).insert(yolo_frames);
         }
+    }
+}
+
+
+// TODO: alphablend frames
+#[derive(Component, Default)]
+pub struct AlphablendFrames {
+    pub frames: HashMap<StreamId, Vec<String>>,
+    pub directory: String,
+}
+impl AlphablendFrames {
+    pub fn load_from_session(
+        session: &Session,
+    ) -> Self {
+        let directory = format!("{}/alphablend", session.directory);
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let mut alphablend_frames = Self {
+            frames: HashMap::new(),
+            directory,
+        };
+        alphablend_frames.reload();
+
+        alphablend_frames
+    }
+
+    pub fn reload(&mut self) {
+        std::fs::read_dir(&self.directory)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_dir())
+            .map(|stream_dir| {
+                let stream_id = StreamId(stream_dir.path().file_name().unwrap().to_str().unwrap().parse::<usize>().unwrap());
+
+                let frames = std::fs::read_dir(stream_dir.path()).unwrap()
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| entry.path().is_file() && entry.path().extension().and_then(|s| s.to_str()) == Some("png"))
+                    .map(|entry| entry.path().to_str().unwrap().to_string())
+                    .collect::<Vec<_>>();
+
+                (stream_id, frames)
+            })
+            .for_each(|(stream_id, frames)| {
+                self.frames.insert(stream_id, frames);
+            });
+    }
+
+    pub fn exists(
+        session: &Session,
+    ) -> bool {
+        let output_directory = format!("{}/alphablend", session.directory);
+        std::fs::metadata(output_directory).is_ok()
+    }
+
+    pub fn image(&self, _camera: usize, _frame: usize) -> Option<Image> {
+        todo!()
     }
 }
 
@@ -498,7 +619,6 @@ impl RawFrames {
 }
 
 
-// TODO: add YOLO for frame filtering and camera calibration
 #[derive(Component, Default)]
 pub struct YoloFrames {
     pub frames: HashMap<StreamId, Vec<Vec<BoundingBox>>>,
@@ -577,28 +697,52 @@ impl YoloFrames {
 
 
 
-#[derive(Component, Default, Reflect)]
-pub struct RotateFrames {
-    pub frames: Vec<String>,
+#[derive(Component, Default)]
+pub struct RotatedFrames {
+    pub frames: HashMap<StreamId, Vec<String>>,
+    pub directory: String,
 }
-impl RotateFrames {
+impl RotatedFrames {
     pub fn load_from_session(
         session: &Session,
     ) -> Self {
-        let output_directory = format!("{}/rotated_frames", session.directory);
-        std::fs::create_dir_all(output_directory).unwrap();
+        let directory = format!("{}/rotated_frames", session.directory);
+        std::fs::create_dir_all(&directory).unwrap();
 
-        // TODO: load all files that are already in the directory
+        let mut raw_frames = Self {
+            frames: HashMap::new(),
+            directory,
+        };
+        raw_frames.reload();
 
-        Self {
-            frames: vec![],
-        }
+        raw_frames
+    }
+
+    pub fn reload(&mut self) {
+        std::fs::read_dir(&self.directory)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().is_dir())
+            .map(|stream_dir| {
+                let stream_id = StreamId(stream_dir.path().file_name().unwrap().to_str().unwrap().parse::<usize>().unwrap());
+
+                let frames = std::fs::read_dir(stream_dir.path()).unwrap()
+                    .filter_map(|entry| entry.ok())
+                    .filter(|entry| entry.path().is_file() && entry.path().extension().and_then(|s| s.to_str()) == Some("png"))
+                    .map(|entry| entry.path().to_str().unwrap().to_string())
+                    .collect::<Vec<_>>();
+
+                (stream_id, frames)
+            })
+            .for_each(|(stream_id, frames)| {
+                self.frames.insert(stream_id, frames);
+            });
     }
 
     pub fn exists(
         session: &Session,
     ) -> bool {
-        let output_directory = format!("{}/frames", session.directory);
+        let output_directory = format!("{}/rotated_frames", session.directory);
         std::fs::metadata(output_directory).is_ok()
     }
 
@@ -690,4 +834,38 @@ fn get_next_session_id(output_directory: &str) -> usize {
             .map_or(0, |max_id| max_id + 1),
         Err(_) => 0,
     }
+}
+
+
+fn rotate_image(
+    image_path: &std::path::Path,
+    output_path: &std::path::Path,
+    angle: f32,
+) -> image::ImageResult<()> {
+    if angle == 0.0 {
+        std::fs::copy(image_path, output_path)?;
+        return Ok(());
+    }
+
+    let dyn_img = image::open(image_path).unwrap();
+    let (w, h) = dyn_img.dimensions();
+
+    let image_bytes = DynamicImage::into_bytes(dyn_img);
+    let image_buffer = ImageBuffer::<Rgb<u8>, Vec<u8>>::from_vec(
+        w,
+        h,
+        image_bytes[..].to_vec(),
+    ).unwrap();
+
+    let radians = angle.to_radians();
+
+    let rotated_image: ImageBuffer::<Rgb<u8>, Vec<u8>> = rotate_about_center(
+        &image_buffer,
+        radians,
+        Interpolation::Bilinear,
+        Rgb([0, 0, 0]),
+    );
+    rotated_image.save(output_path)?;
+
+    Ok(())
 }

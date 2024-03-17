@@ -98,17 +98,6 @@ view the [onshape model](https://cad.onshape.com/documents/20d4b522e97cda88fb785
 ![Alt text](docs/light_field_camera_onshape_transparent.webp)
 
 
-## setup rtsp streaming server
-
-it is useful to test the light field viewer with emulated camera streams
-
-### obs studio
-
-- install https://obsproject.com/
-- install rtsp plugin https://github.com/iamscottxu/obs-rtspserver/releases
-- tools > rtsp server > start server
-
-
 ## compatible bevy versions
 
 | `bevy_light_field`    | `bevy` |
@@ -122,6 +111,7 @@ it is useful to test the light field viewer with emulated camera streams
 - [modnet](https://github.com/ZHKKKe/MODNet)
 - [nersemble](https://github.com/tobias-kirschstein/nersemble)
 - [paddle_seg_matting](https://github.com/PaddlePaddle/PaddleSeg/blob/release/2.9/Matting/docs/quick_start_en.md)
+- [pose diffusion](https://github.com/facebookresearch/PoseDiffusion)
 - [ray diffusion](https://github.com/jasonyzhang/RayDiffusion)
 
 

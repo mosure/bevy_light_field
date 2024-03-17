@@ -4,11 +4,9 @@ use bevy::{
     tasks::{block_on, futures_lite::future, AsyncComputeTaskPool, Task},
 };
 use bevy_ort::{
-    BevyOrtPlugin,
-    inputs,
     models::modnet::{
-        images_to_modnet_input,
-        modnet_output_to_luma_images,
+        Modnet,
+        modnet_inference,
     },
     Onnx,
 };
@@ -45,9 +43,7 @@ impl MattingPlugin {
 
 impl Plugin for MattingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(BevyOrtPlugin);
         app.register_type::<MattedStream>();
-        app.init_resource::<Modnet>();
         app.insert_resource(self.max_inference_size.clone());
         app.add_systems(Startup, load_modnet);
         app.add_systems(Update, matting_inference);
@@ -55,17 +51,12 @@ impl Plugin for MattingPlugin {
 }
 
 
-#[derive(Resource, Default)]
-pub struct Modnet {
-    pub onnx: Handle<Onnx>,
-}
-
 
 fn load_modnet(
     asset_server: Res<AssetServer>,
     mut modnet: ResMut<Modnet>,
 ) {
-    let modnet_handle: Handle<Onnx> = asset_server.load("modnet_photographic_portrait_matting.onnx");
+    let modnet_handle: Handle<Onnx> = asset_server.load("models/modnet_photographic_portrait_matting.onnx");
     modnet.onnx = modnet_handle;
 }
 
@@ -107,7 +98,8 @@ fn matting_inference(
         .map(|(_, matted_stream)| {
             let input = images.get(matted_stream.input.clone()).unwrap();
             let output = (matted_stream.output.clone(), matted_stream.material.clone());
-            (input, output)
+
+            (input.clone(), output)
         })
         .unzip();
 
@@ -116,11 +108,6 @@ fn matting_inference(
         return;
     }
 
-    let input = images_to_modnet_input(
-        inputs.as_slice(),
-        inference_size.0.into(),
-    );
-
     if onnx_assets.get(&modnet.onnx).is_none() {
         return;
     }
@@ -128,18 +115,20 @@ fn matting_inference(
     let onnx = onnx_assets.get(&modnet.onnx).unwrap();
     let session_arc = onnx.session.clone();
 
+    let inference_size = inference_size.0.into();
+
     let task = thread_pool.spawn(async move {
+        let inputs = inputs.iter().collect::<Vec<_>>();
+
         let mask_images: Result<Vec<Image>, String> = (|| {
             let session_lock = session_arc.lock().map_err(|e| e.to_string())?;
             let session = session_lock.as_ref().ok_or("failed to get session from ONNX asset")?;
 
-            let input_values = inputs!["input" => input.view()].map_err(|e| e.to_string())?;
-            let outputs = session.run(input_values).map_err(|e| e.to_string());
-
-            let binding = outputs.ok().unwrap();
-            let output_value: &ort::Value = binding.get("output").unwrap();
-
-            Ok(modnet_output_to_luma_images(output_value))
+            Ok(modnet_inference(
+                session,
+                inputs.as_slice(),
+                inference_size,
+            ))
         })();
 
         match mask_images {

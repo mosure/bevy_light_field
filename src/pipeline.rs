@@ -29,6 +29,7 @@ use image::{
     ImageBuffer,
     Luma,
     Rgb,
+    Rgba,
 };
 use imageproc::geometric_transformations::{
     rotate_about_center,
@@ -59,6 +60,7 @@ impl Plugin for PipelinePlugin {
                 generate_raw_frames,
                 generate_rotated_frames,
                 generate_mask_frames,
+                generate_alphablend_frames,
                 generate_yolo_frames,
             )
         );
@@ -70,6 +72,7 @@ impl Plugin for PipelinePlugin {
 pub struct PipelineConfig {
     pub raw_frames: bool,
     pub rotate_raw_frames: bool,
+    pub alphablend_frames: bool,
     pub yolo: bool,                         // https://github.com/ultralytics/ultralytics
     pub repair_frames: bool,                // https://huggingface.co/docs/diffusers/en/optimization/onnx & https://github.com/bnm6900030/swintormer
     pub upsample_frames: bool,              // https://huggingface.co/ssube/stable-diffusion-x4-upscaler-onnx
@@ -85,9 +88,10 @@ impl Default for PipelineConfig {
             raw_frames: true,
             rotate_raw_frames: true,
             yolo: true,
-            repair_frames: false,
-            upsample_frames: false,
+            alphablend_frames: true,
             mask_frames: true,
+            upsample_frames: false,
+            repair_frames: false,
             light_field_cameras: false,
             depth_maps: false,
             gaussian_cloud: false,
@@ -227,8 +231,6 @@ fn generate_rotated_frames(
         raw_frames,
         session,
     ) in raw_frames.iter() {
-        // TODO: get stream descriptor rotation
-
         if config.rotate_raw_frames {
             let run_node = !RotatedFrames::exists(session);
             let mut rotated_frames = RotatedFrames::load_from_session(session);
@@ -391,6 +393,66 @@ fn generate_mask_frames(
 }
 
 
+fn generate_alphablend_frames(
+    mut commands: Commands,
+    session: Query<
+        (
+            Entity,
+            &PipelineConfig,
+            &RotatedFrames,
+            &MaskFrames,
+            &Session,
+        ),
+        Without<AlphablendFrames>,
+    >,
+) {
+    for (
+        entity,
+        config,
+        rotated_frames,
+        mask_frames,
+        session,
+    ) in session.iter() {
+        if config.alphablend_frames {
+            let run_node = !AlphablendFrames::exists(session);
+            let mut alphablend_frames = AlphablendFrames::load_from_session(session);
+
+            if run_node {
+                info!("generating alphablend frames for session {}", session.id);
+
+                rotated_frames.frames.iter()
+                    .for_each(|(stream_id, frames)| {
+                        let output_directory = format!("{}/{}", alphablend_frames.directory, stream_id.0);
+                        std::fs::create_dir_all(&output_directory).unwrap();
+
+                        let frames = frames.par_iter()
+                            .zip(mask_frames.frames.get(stream_id).unwrap())
+                            .map(|(frame, mask)| {
+                                let frame_idx = std::path::Path::new(frame).file_stem().unwrap().to_str().unwrap();
+                                let output_path = format!("{}/{}.png", output_directory, frame_idx);
+
+                                alphablend_image(
+                                    std::path::Path::new(frame),
+                                    std::path::Path::new(mask),
+                                    std::path::Path::new(&output_path),
+                                ).unwrap();
+
+                                output_path
+                            })
+                            .collect::<Vec<_>>();
+
+                            alphablend_frames.frames.insert(*stream_id, frames);
+                    });
+            } else {
+                info!("alphablend frames already exist for session {}", session.id);
+            }
+
+            commands.entity(entity).insert(alphablend_frames);
+        }
+    }
+}
+
+
 fn generate_yolo_frames(
     mut commands: Commands,
     raw_frames: Query<
@@ -504,7 +566,6 @@ fn generate_yolo_frames(
 }
 
 
-// TODO: alphablend frames
 #[derive(Component, Default)]
 pub struct AlphablendFrames {
     pub frames: HashMap<StreamId, Vec<String>>,
@@ -837,6 +898,30 @@ fn get_next_session_id(output_directory: &str) -> usize {
 }
 
 
+pub fn load_png(
+    image_path: &std::path::Path,
+) -> Image {
+    let image = image::open(image_path).unwrap();
+    let image = image.into_rgba8();
+    let width = image.width();
+    let height = image.height();
+
+    let image_bytes = image.into_raw();
+
+    Image::new(
+        Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        bevy::render::render_resource::TextureDimension::D2,
+        image_bytes,
+        bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::all(),
+    )
+}
+
+
 fn rotate_image(
     image_path: &std::path::Path,
     output_path: &std::path::Path,
@@ -866,6 +951,31 @@ fn rotate_image(
         Rgb([0, 0, 0]),
     );
     rotated_image.save(output_path)?;
+
+    Ok(())
+}
+
+
+fn alphablend_image(
+    image_path: &std::path::Path,
+    mask_path: &std::path::Path,
+    output_path: &std::path::Path,
+) -> image::ImageResult<()> {
+    let img = image::open(image_path).unwrap();
+
+    let mask = image::open(mask_path).unwrap();
+    let mask = mask.resize_exact(img.width(), img.height(), image::imageops::FilterType::Triangle);
+
+    let mut output_img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::new(img.dimensions().0, img.dimensions().1);
+
+    for (x, y, pixel) in img.pixels() {
+        let mask_pixel = mask.get_pixel(x, y).0[0];
+        let mut img_pixel = pixel.0;
+        img_pixel[3] = mask_pixel;
+        output_img.put_pixel(x, y, Rgba(img_pixel));
+    }
+
+    output_img.save(output_path)?;
 
     Ok(())
 }

@@ -16,7 +16,6 @@ use bevy::{
         },
     },
     time::Stopwatch,
-    window::PrimaryWindow,
 };
 use bevy_args::{
     parse_args,
@@ -25,28 +24,57 @@ use bevy_args::{
     Parser,
     Serialize,
 };
+use clap::ValueEnum;
 
 use bevy_light_field::{
-    LightFieldPlugin,
+    grid_view::{
+        Element,
+        GridView
+    },
     materials::foreground::ForegroundMaterial,
-    matting::MattingPlugin,
+    matting::{
+        MattedStream,
+        MattingPlugin,
+    },
     person_detect::{
         DetectPersons,
         PersonDetectedEvent,
     },
     pipeline::{
+        load_png,
+        AlphablendFrames,
+        MaskFrames,
         PipelineConfig,
-        StreamSessionBundle,
-        Session,
+        RawFrames,
         RawStreams,
+        RotatedFrames,
+        Session,
+        StreamSessionBundle,
     },
     stream::{
         RtspStreamHandle,
         RtspStreamManager,
     },
+    LightFieldPlugin,
 };
 
-use bevy_light_field::matting::MattedStream;
+
+#[derive(
+    Debug,
+    Default,
+    Clone,
+    Serialize,
+    Deserialize,
+    ValueEnum,
+)]
+pub enum OfflineAnnotation {
+    Raw,
+    Rotated,
+    Mask,
+    #[default]
+    Alphablend,
+    Yolo,
+}
 
 
 #[derive(
@@ -65,7 +93,7 @@ pub struct LightFieldViewer {
     #[arg(long, default_value = "false")]
     pub show_fps: bool,
 
-    #[arg(long, default_value = "false")]
+    #[arg(long, default_value = "true")]
     pub automatic_recording: bool,
 
     #[arg(long, default_value = "false")]
@@ -83,12 +111,18 @@ pub struct LightFieldViewer {
 
     #[arg(long)]
     pub session_id: Option<usize>,
+    #[arg(long)]
+    pub annotation: Option<OfflineAnnotation>,
+    #[arg(long)]
+    pub frame: Option<usize>,
 }
 
 
 
 fn main() {
     let args = parse_args::<LightFieldViewer>();
+
+    let online = args.session_id.is_none();
 
     let mode = if args.fullscreen {
         bevy::window::WindowMode::BorderlessFullscreen
@@ -122,34 +156,52 @@ fn main() {
                 args.max_matting_height,
             )),
         ))
-        .init_resource::<LiveSession>()
-        .add_systems(
-            Startup,
-            (
-                create_mask_streams,
-                setup_camera,
-                select_session_from_args,
+        .add_systems(Startup, setup_camera)
+        .add_systems(Update, press_esc_close);
+
+    if online {
+        app
+            .init_resource::<LiveSession>()
+            .add_systems(
+                Startup,
+                (
+                    create_mask_streams,
+                ),
             )
-        )
-        .add_systems(
-            PostStartup,
-            (
-                setup_ui_gridview,
+            .add_systems(
+                PostStartup,
+                (
+                    setup_live_gridview,
+                ),
             )
-        )
-        .add_systems(
-            Update,
-            (
-                press_esc_close,
-                automatic_recording,
-                press_r_start_recording,
-                press_s_stop_recording
+            .add_systems(
+                Update,
+                (
+                    automatic_recording,
+                    press_r_start_recording,
+                    press_s_stop_recording
+                ),
+            );
+    } else {
+        app
+            .insert_resource(FrameIndex(args.frame.unwrap_or_default()))
+            .add_systems(
+                Startup,
+                (
+                    select_session_from_args,
+                ),
             )
-        );
+            .add_systems(
+                Update,
+                (
+                    offline_viewer,
+                ),
+            );
+    }
 
     if args.show_fps {
         app.add_plugins(FrameTimeDiagnosticsPlugin);
-        app.add_systems(PostStartup, fps_display_setup.after(setup_ui_gridview));
+        app.add_systems(PostStartup, fps_display_setup.after(setup_live_gridview));
         app.add_systems(Update, fps_update_system);
     }
 
@@ -157,7 +209,6 @@ fn main() {
 }
 
 
-// TODO: move to MattingPlugin
 fn create_mask_streams(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
@@ -217,9 +268,8 @@ fn create_mask_streams(
 }
 
 
-fn setup_ui_gridview(
-    mut commands: Commands,
-    primary_window: Query<&Window, With<PrimaryWindow>>,
+fn setup_live_gridview(
+    mut grid_view: ResMut<GridView>,
     input_streams: Query<(
         Entity,
         &RtspStreamHandle,
@@ -232,67 +282,21 @@ fn setup_ui_gridview(
         With<DetectPersons>,
     >,
 ) {
-    let window = primary_window.single();
-
     let visible_input_streams = input_streams.iter()
         .filter(|(_, stream)| stream.descriptor.visible.unwrap_or_default())
         .collect::<Vec<_>>();
 
-    let visible_streams = visible_input_streams.len() + person_detection_stream.iter().count();
+    let grid_elements = visible_input_streams.iter()
+        .map(|(_, input_stream)| Element::Image(input_stream.image.clone()))
+        .chain(
+            person_detection_stream.iter()
+                .map(|(_, matted_stream) | Element::Alphablend(matted_stream.material.clone()))
+        )
+        .collect::<Vec<_>>();
 
-    let (
-        columns,
-        rows,
-        _sprite_width,
-        _sprite_height,
-    ) = calculate_grid_dimensions(
-        window.width(),
-        window.height(),
-        visible_streams,
-    );
-
-    commands.spawn(NodeBundle {
-        style: Style {
-            display: Display::Grid,
-            width: Val::Percent(100.0),
-            height: Val::Percent(100.0),
-            grid_template_columns: RepeatedGridTrack::flex(columns as u16, 1.0),
-            grid_template_rows: RepeatedGridTrack::flex(rows as u16, 1.0),
-            ..default()
-        },
-        background_color: BackgroundColor(Color::BLACK),
-        ..default()
-    })
-    .with_children(|builder| {
-        visible_input_streams
-            .iter()
-            .for_each(|(_, input_stream)| {
-                builder.spawn(ImageBundle {
-                    style: Style {
-                        width: Val::Percent(100.0),
-                        height: Val::Percent(100.0),
-                        ..default()
-                    },
-                    image: UiImage::new(input_stream.image.clone()),
-                    ..default()
-                });
-            });
-
-        person_detection_stream
-            .iter()
-            .for_each(|(_, matted_stream)| {
-                builder.spawn(MaterialNodeBundle {
-                    style: Style {
-                        width: Val::Percent(100.0),
-                        height: Val::Percent(100.0),
-                        ..default()
-                    },
-                    material: matted_stream.material.clone(),
-                    ..default()
-                });
-            });
-    });
+    grid_view.source = grid_elements;
 }
+
 
 fn setup_camera(
     mut commands: Commands,
@@ -337,6 +341,77 @@ fn select_session_from_args(
         },
     );
 }
+
+
+#[derive(Resource, Default)]
+struct FrameIndex(usize);
+
+fn offline_viewer(
+    asset_server: Res<AssetServer>,
+    mut grid_view: ResMut<GridView>,
+    frame_index: Res<FrameIndex>,
+    args: Res<LightFieldViewer>,
+    session: Query<
+        (
+            Entity,
+            &PipelineConfig,
+            &RawFrames,
+            &RotatedFrames,
+            &MaskFrames,
+            &AlphablendFrames,
+            &Session,
+        ),
+    >,
+    mut complete: Local<bool>,
+) {
+    if session.is_empty() {
+        return;
+    }
+
+    if !frame_index.is_changed() && *complete {
+        return;
+    }
+
+    let session = session.iter().next().unwrap();
+
+    let mut frames = match args.annotation.clone().unwrap_or_default() {
+        OfflineAnnotation::Raw => &session.2.frames,
+        OfflineAnnotation::Rotated => &session.3.frames,
+        OfflineAnnotation::Mask => &session.4.frames,
+        OfflineAnnotation::Alphablend => &session.5.frames,
+        OfflineAnnotation::Yolo => unimplemented!(),
+    }.iter()
+        .map(|(stream_id, frames)| {
+            let mut sorted_frames = frames.clone();
+            sorted_frames.sort_by(|a, b| {
+                let stem_a = std::path::Path::new(a).file_stem().unwrap().to_str().unwrap();
+                let stem_b = std::path::Path::new(b).file_stem().unwrap().to_str().unwrap();
+
+                let a_idx = stem_a.parse::<usize>().unwrap();
+                let b_idx = stem_b.parse::<usize>().unwrap();
+
+                a_idx.cmp(&b_idx)
+            });
+
+            (stream_id, sorted_frames[frame_index.0].clone())
+        })
+        .collect::<Vec<_>>();
+
+    frames.sort_by(|a, b| a.0.0.partial_cmp(&b.0.0).unwrap());
+
+    let frames = frames.iter()
+        .map(|(_stream_id, frame)| {
+            let image = load_png(std::path::Path::new(frame));
+
+            Element::Image(asset_server.add(image))
+        })
+        .collect::<Vec<_>>();
+
+    grid_view.source = frames;
+
+    *complete = true;
+}
+
 
 
 fn automatic_recording(
@@ -446,68 +521,35 @@ fn press_s_stop_recording(
 
 
 
-fn calculate_grid_dimensions(window_width: f32, window_height: f32, num_streams: usize) -> (usize, usize, f32, f32) {
-    let window_aspect_ratio = window_width / window_height;
-    let stream_aspect_ratio: f32 = 16.0 / 9.0;
-    let mut best_layout = (1, num_streams);
-    let mut best_diff = f32::INFINITY;
-    let mut best_sprite_size = (0.0, 0.0);
-
-    for columns in 1..=num_streams {
-        let rows = (num_streams as f32 / columns as f32).ceil() as usize;
-        let sprite_width = window_width / columns as f32;
-        let sprite_height = sprite_width / stream_aspect_ratio;
-        let total_height_needed = sprite_height * rows as f32;
-        let (final_sprite_width, final_sprite_height) = if total_height_needed > window_height {
-            let adjusted_sprite_height = window_height / rows as f32;
-            let adjusted_sprite_width = adjusted_sprite_height * stream_aspect_ratio;
-            (adjusted_sprite_width, adjusted_sprite_height)
-        } else {
-            (sprite_width, sprite_height)
-        };
-        let grid_aspect_ratio = final_sprite_width * columns as f32 / (final_sprite_height * rows as f32);
-        let diff = (window_aspect_ratio - grid_aspect_ratio).abs();
-
-        if diff < best_diff {
-            best_diff = diff;
-            best_layout = (columns, rows);
-            best_sprite_size = (final_sprite_width, final_sprite_height);
-        }
-    }
-
-    (best_layout.0, best_layout.1, best_sprite_size.0, best_sprite_size.1)
-}
-
-
-
-
-
 fn fps_display_setup(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
 ) {
-    commands.spawn((
-        TextBundle::from_sections([
-            TextSection::new(
-                "fps: ",
-                TextStyle {
-                    font: asset_server.load("fonts/Caveat-Bold.ttf"),
-                    font_size: 60.0,
-                    color: Color::WHITE,
-                },
-            ),
-            TextSection::from_style(TextStyle {
-                font: asset_server.load("fonts/Caveat-Medium.ttf"),
+    let mut bundle = TextBundle::from_sections([
+        TextSection::new(
+            "fps: ",
+            TextStyle {
+                font: asset_server.load("fonts/Caveat-Bold.ttf"),
                 font_size: 60.0,
-                color: Color::GOLD,
-            }),
-        ]).with_style(Style {
-            position_type: PositionType::Absolute,
-            width: Val::Px(200.0),
-            bottom: Val::Px(5.0),
-            right: Val::Px(15.0),
-            ..default()
+                color: Color::WHITE,
+            },
+        ),
+        TextSection::from_style(TextStyle {
+            font: asset_server.load("fonts/Caveat-Medium.ttf"),
+            font_size: 60.0,
+            color: Color::GOLD,
         }),
+    ]).with_style(Style {
+        position_type: PositionType::Absolute,
+        width: Val::Px(200.0),
+        bottom: Val::Px(5.0),
+        right: Val::Px(15.0),
+        ..default()
+    });
+    bundle.z_index = ZIndex::Global(10);
+
+    commands.spawn((
+        bundle,
         FpsText,
     ));
 }

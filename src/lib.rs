@@ -2,6 +2,7 @@ use bevy::prelude::*;
 use bevy_ort::BevyOrtPlugin;
 
 pub mod ffmpeg;
+pub mod grid_view;
 pub mod materials;
 pub mod matting;
 pub mod mp4;
@@ -19,6 +20,7 @@ impl Plugin for LightFieldPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(BevyOrtPlugin);
 
+        app.add_plugins(grid_view::GridViewPlugin);
         app.add_plugins(materials::StreamMaterialsPlugin);
         app.add_plugins(person_detect::PersonDetectPlugin);
         app.add_plugins(pipeline::PipelinePlugin);

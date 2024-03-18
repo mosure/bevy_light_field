@@ -44,7 +44,7 @@ bevy_ort = { version = "0.8", optional = true, features = ["yolo_v8"] }
 bytes = "1.5"
 clap = { version = "4.4", features = ["derive"] }
 futures = "0.3"
-image = { version = "0.24", optional = true }         # update /w `bevy` crate
+image = { version = "0.25", optional = true }         # update /w `bevy` crate
 imageproc = { version = "0.23.0", optional = true }   # update /w `image` crate
 ndarray = { version = "0.15", optional = true }
 openh264 = "0.5"

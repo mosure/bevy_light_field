@@ -13,7 +13,7 @@ rust bevy light field camera array tooling
 - [X] person segmentation post-process (batch across streams)
 - [X] async segmentation model inference
 - [X] foreground extraction post-process and visualization mode
-- [ ] recording session timeline viewer
+- [X] recording session viewer
 - [ ] camera array calibration (extrinsics, intrinsics, color)
 - [ ] camera position visualization
 - [ ] 3d reconstruction dataset preparation

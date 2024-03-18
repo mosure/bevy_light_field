@@ -195,6 +195,7 @@ fn main() {
                 Update,
                 (
                     offline_viewer,
+                    press_arrow_key_frame_navigation,
                 ),
             );
     }
@@ -517,7 +518,18 @@ fn press_s_stop_recording(
 }
 
 
-// TODO: add pipeline viewer /w left/right arrow keys and UI controls to switch between frames
+fn press_arrow_key_frame_navigation(
+    mut frame_index: ResMut<FrameIndex>,
+    keys: Res<ButtonInput<KeyCode>>,
+) {
+    if keys.just_pressed(KeyCode::ArrowLeft) {
+        frame_index.0 = frame_index.0.saturating_sub(1);
+    }
+
+    if keys.just_pressed(KeyCode::ArrowRight) {
+        frame_index.0 += 1;
+    }
+}
 
 
 
